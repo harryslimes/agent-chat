@@ -48,6 +48,30 @@ CREATE TABLE IF NOT EXISTS viewers (
 );
 
 CREATE INDEX IF NOT EXISTS chats_expires ON chats(expires_at);
+
+-- OAuth for the owner connector (claude.ai can't send a custom Authorization header).
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id     TEXT PRIMARY KEY,
+  client_name   TEXT NOT NULL,
+  redirect_uris TEXT NOT NULL,               -- JSON array
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code_hash     TEXT PRIMARY KEY,
+  client_id     TEXT NOT NULL,
+  redirect_uri  TEXT NOT NULL,
+  challenge     TEXT NOT NULL,               -- PKCE S256
+  expires_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  token_hash    TEXT PRIMARY KEY,
+  kind          TEXT NOT NULL,               -- access | refresh
+  client_id     TEXT NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL
+);
 `;
 
 export function openDb(path: string): DatabaseSync {

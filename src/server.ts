@@ -4,14 +4,16 @@ import { loadConfig } from './config.js';
 import { openDb } from './db.js';
 import { createApp } from './http.js';
 import { createMcp } from './mcp.js';
+import { OAuthService } from './oauth.js';
 
 const MAX_BODY = 64 * 1024;
 
 const cfg = loadConfig();
 const db = openDb(cfg.dbPath);
 const chats = new ChatService(db, cfg);
-const mcp = createMcp(chats, cfg);
-const app = createApp({ cfg, chats, mcp });
+const oauth = new OAuthService(db, cfg);
+const mcp = createMcp(chats, cfg, oauth);
+const app = createApp({ cfg, chats, mcp, oauth });
 
 function clientIp(req: IncomingMessage): string {
   if (cfg.trustProxy) {

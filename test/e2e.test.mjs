@@ -32,11 +32,12 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function mcpClient(headers = {}) {
+async function mcpClientAt(path, headers = {}) {
   const client = new Client({ name: 'test', version: '0' });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { requestInit: { headers } }));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}${path}`), { requestInit: { headers } }));
   return client;
 }
+const mcpClient = (headers = {}) => mcpClientAt('/mcp', headers);
 const call = async (client, name, args) => {
   const r = await client.callTool({ name, arguments: args });
   return { text: r.content.map((c) => c.text).join('\n'), isError: !!r.isError };
@@ -245,4 +246,66 @@ test('ordinary markup and Q&A lines are not flagged', async () => {
   const msg = got.data.messages.find((m) => m.from === 'guest');
   assert.equal(msg.text, text);
   assert.equal(msg.flags, undefined);
+});
+
+test('owner connector OAuth: discovery, registration, login, PKCE, tokens, refresh rotation, revoke', async () => {
+  const { createHash, randomBytes } = await import('node:crypto');
+  // 1. Unauthenticated owner endpoint points at the resource metadata.
+  const r401 = await fetch(`${BASE}/mcp/owner`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(r401.status, 401);
+  const metaUrl = r401.headers.get('www-authenticate').match(/resource_metadata="([^"]+)"/)[1];
+  const prm = await (await fetch(metaUrl)).json();
+  assert.equal(prm.resource, `${BASE}/mcp/owner`);
+  const as = await (await fetch(`${prm.authorization_servers[0]}/.well-known/oauth-authorization-server`)).json();
+  assert.deepEqual(as.code_challenge_methods_supported, ['S256']);
+
+  // 2. Registration: disallowed redirect host refused; allowed one accepted.
+  assert.equal((await api('/oauth/register', { method: 'POST', body: { redirect_uris: ['https://evil.example/cb'] } })).status, 400);
+  const redirect = 'https://claude.ai/api/mcp/auth_callback';
+  const reg = await api('/oauth/register', { method: 'POST', body: { client_name: 'Claude', redirect_uris: [redirect] } });
+  assert.equal(reg.status, 201);
+  const clientId = reg.data.client_id;
+
+  // 3. Authorize page renders; wrong key re-renders with an error; right key redirects with a code.
+  const verifier = randomBytes(32).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, state: 'st8', code_challenge: challenge, code_challenge_method: 'S256', resource: `${BASE}/mcp/owner` });
+  const page = await fetch(`${as.authorization_endpoint}?${q}`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get('content-security-policy'), /form-action 'self' https:\/\/claude\.ai/);
+  assert.match(await page.text(), /name="owner_key"/);
+  const post = (key) => fetch(as.authorization_endpoint, { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: BASE }, body: new URLSearchParams({ ...Object.fromEntries(q), owner_key: key, action: 'approve' }) });
+  const bad = await post('wrong-key');
+  assert.equal(bad.status, 403);
+  assert.match(await bad.text(), /not correct/);
+  const good = await post(OWNER_KEY);
+  assert.equal(good.status, 302);
+  const loc = new URL(good.headers.get('location'));
+  assert.equal(loc.origin + loc.pathname, redirect);
+  assert.equal(loc.searchParams.get('state'), 'st8');
+  const code = loc.searchParams.get('code');
+
+  // 4. Token exchange: wrong verifier fails (and burns the code); a fresh code with the right verifier works.
+  const tok = (params) => fetch(as.token_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params) }).then(async (r) => ({ status: r.status, data: await r.json() }));
+  const wrong = await tok({ grant_type: 'authorization_code', code, redirect_uri: redirect, client_id: clientId, code_verifier: 'x'.repeat(43) });
+  assert.equal(wrong.data.error, 'invalid_grant');
+  const replay = await tok({ grant_type: 'authorization_code', code, redirect_uri: redirect, client_id: clientId, code_verifier: verifier });
+  assert.equal(replay.data.error, 'invalid_grant', 'codes are single use');
+  const code2 = new URL((await post(OWNER_KEY)).headers.get('location')).searchParams.get('code');
+  const t = await tok({ grant_type: 'authorization_code', code: code2, redirect_uri: redirect, client_id: clientId, code_verifier: verifier });
+  assert.equal(t.status, 200, JSON.stringify(t.data));
+  assert.match(t.data.access_token, /^at_/);
+
+  // 5. Access token unlocks owner tools on /mcp/owner.
+  const owner = await mcpClientAt('/mcp/owner', { Authorization: `Bearer ${t.data.access_token}` });
+  assert.ok((await owner.listTools()).tools.map((x) => x.name).includes('create_chat'));
+
+  // 6. Refresh rotates: new pair works, old refresh token is dead.
+  const t2 = await tok({ grant_type: 'refresh_token', refresh_token: t.data.refresh_token, client_id: clientId });
+  assert.equal(t2.status, 200);
+  assert.equal((await tok({ grant_type: 'refresh_token', refresh_token: t.data.refresh_token, client_id: clientId })).data.error, 'invalid_grant');
+
+  // 7. Revoke-all kills tokens.
+  assert.equal((await api('/api/oauth/revoke', { method: 'POST', token: OWNER_KEY })).status, 200);
+  assert.equal((await fetch(`${BASE}/mcp/owner`, { method: 'POST', headers: { Authorization: `Bearer ${t2.data.access_token}`, 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
 });

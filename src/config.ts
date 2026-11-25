@@ -37,6 +37,8 @@ export interface Config {
   /** Per IP, requests per minute across the whole service. */
   requestsPerMinute: number;
   maxWaitSeconds: number;
+  /** Hosts allowed as OAuth redirect targets for the owner connector (claude.ai, Claude Code on localhost). */
+  oauthRedirectHosts: string[];
 }
 
 export function loadConfig(): Config {
@@ -59,5 +61,7 @@ export function loadConfig(): Config {
     joinPerHour: int('JOIN_PER_HOUR', 20),
     requestsPerMinute: int('REQUESTS_PER_MINUTE', 240),
     maxWaitSeconds: int('MAX_WAIT_SECONDS', 30),
+    oauthRedirectHosts: (process.env.OAUTH_REDIRECT_HOSTS ?? 'claude.ai,claude.com,localhost,127.0.0.1')
+      .split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
   };
 }

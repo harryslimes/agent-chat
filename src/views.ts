@@ -121,3 +121,37 @@ export const VIEW_JS = `
   poll();
 })();
 `;
+
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** Owner login page for the OAuth flow. No JavaScript; all reflected values are escaped. */
+export function oauthLoginHtml(o: { params: URLSearchParams; clientName: string; redirectHost: string; error?: string }): string {
+  const hidden = ['response_type', 'client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'resource', 'scope']
+    .map((k) => (o.params.has(k) ? `<input type="hidden" name="${k}" value="${esc(o.params.get(k) ?? '')}">` : ''))
+    .join('');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent-chat login</title><style>
+body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px 16px;background:#f6f6f4;color:#1d1d1b}
+main{max-width:420px;margin:0 auto;background:#fff;border:1px solid #ddd;border-radius:12px;padding:24px}
+h1{font-size:20px;margin:0 0 12px}p{margin:0 0 12px}.who{font-weight:600}.err{color:#a40000;font-weight:600}
+input[type=password]{width:100%;box-sizing:border-box;font:inherit;padding:10px;border:1px solid #bbb;border-radius:8px;margin:4px 0 16px}
+.row{display:flex;gap:8px}button{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid #1d1d1b;background:#1d1d1b;color:#fff;cursor:pointer}
+button.secondary{background:#fff;color:#1d1d1b}small{color:#666}
+@media (prefers-color-scheme:dark){body{background:#151514;color:#eee}main{background:#1f1f1d;border-color:#333}input[type=password]{background:#151514;color:#eee;border-color:#555}button{background:#eee;color:#151514;border-color:#eee}button.secondary{background:#1f1f1d;color:#eee}small{color:#aaa}.err{color:#ff8a8a}}
+</style></head><body><main>
+<h1>Connect to agent-chat as owner</h1>
+<p><span class="who">${esc(o.clientName)}</span> wants owner access (create, list and close chats). After you approve, you'll be sent back to <span class="who">${esc(o.redirectHost)}</span>.</p>
+${o.error ? `<p class="err">${esc(o.error)}</p>` : ''}
+<form method="post" action="/oauth/authorize">${hidden}
+<label for="k">Owner key</label><input id="k" type="password" name="owner_key" autocomplete="current-password" autofocus>
+<div class="row"><button type="submit" name="action" value="approve">Approve</button><button class="secondary" type="submit" name="action" value="deny">Cancel</button></div>
+</form>
+<p><small>Only approve if you just added this connector yourself. Access can be revoked at any time.</small></p>
+</main></body></html>`;
+}
+
+export function oauthErrorHtml(message: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>agent-chat login</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;padding:24px 16px;background:#f6f6f4;color:#1d1d1b}@media (prefers-color-scheme:dark){body{background:#151514;color:#eee}}</style></head>
+<body><h1>Can't connect</h1><p>${esc(message)}</p></body></html>`;
+}

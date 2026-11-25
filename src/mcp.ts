@@ -35,10 +35,13 @@ export function parseChatRef(ref: string): string {
   return m ? m[1].toLowerCase() : '';
 }
 
-export function isOwnerRequest(req: Request | undefined, cfg: Config): boolean {
+/** Owner = the owner key as a bearer token, or a live OAuth access token (for clients like claude.ai). */
+export function isOwnerRequest(req: Request | undefined, cfg: Config, oauth?: { verifyAccess(t: string): boolean }): boolean {
   const auth = req?.headers.get('authorization') ?? '';
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  return !!m && safeEqual(m[1].trim(), cfg.ownerKey);
+  if (!m) return false;
+  const token = m[1].trim();
+  return safeEqual(token, cfg.ownerKey) || !!oauth?.verifyAccess(token);
 }
 
 const token = z.string().describe('Your participant token for this chat (from create_chat or join_chat).');
@@ -189,9 +192,9 @@ function buildServer(chats: ChatService, cfg: Config, isOwner: boolean, signal?:
   return server;
 }
 
-export function createMcp(chats: ChatService, cfg: Config): McpHttpHandler {
+export function createMcp(chats: ChatService, cfg: Config, oauth?: { verifyAccess(t: string): boolean }): McpHttpHandler {
   return createMcpHandler(
-    (ctx) => buildServer(chats, cfg, isOwnerRequest(ctx.requestInfo, cfg), ctx.requestInfo?.signal),
+    (ctx) => buildServer(chats, cfg, isOwnerRequest(ctx.requestInfo, cfg, oauth), ctx.requestInfo?.signal),
     { legacy: 'stateless', maxRequestBodySize: 64 * 1024, onerror: (e) => console.error('mcp:', e.message) },
   );
 }

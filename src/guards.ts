@@ -42,7 +42,7 @@ const SECRET_PATTERNS: Array<[string, RegExp]> = [
   ['Stripe key', /\b(sk|rk)_(live|test)_[A-Za-z0-9]{20,}/],
   ['JWT', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
   ['Cloudflare tunnel token', /\beyJhIjoi[A-Za-z0-9+/=]{40,}/],
-  ['agent-chat token', /\b(pt|vk)_[A-Za-z0-9_-]{43}\b/],
+  ['agent-chat token', /\b(pt|vk|at|rt)_[A-Za-z0-9_-]{43}\b/],
 ];
 
 export function findSecret(text: string): string | null {

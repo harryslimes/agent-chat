@@ -3,8 +3,9 @@ import { ChatError, type ChatService } from './chat.js';
 import type { Config } from './config.js';
 import { RateLimiter } from './guards.js';
 import { isOwnerRequest } from './mcp.js';
+import { OAuthError, type OAuthService, OWNER_MCP_PATH } from './oauth.js';
 import { agentInstructions, inviteText, TRUST_NOTE } from './text.js';
-import { VIEW_CSS, VIEW_JS, viewHtml } from './views.js';
+import { oauthErrorHtml, oauthLoginHtml, VIEW_CSS, VIEW_JS, viewHtml } from './views.js';
 
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
@@ -49,13 +50,35 @@ async function body(req: Request): Promise<Record<string, unknown>> {
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
+/** Read a form-encoded or JSON body as URLSearchParams (OAuth endpoints accept both). */
+async function formParams(req: Request): Promise<URLSearchParams> {
+  const raw = await req.text();
+  if ((req.headers.get('content-type') ?? '').includes('application/json')) {
+    try {
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      return new URLSearchParams(Object.entries(o).filter(([, v]) => typeof v === 'string') as Array<[string, string]>);
+    } catch {
+      return new URLSearchParams();
+    }
+  }
+  return new URLSearchParams(raw);
+}
+
+const oauthJsonError = (e: OAuthError) => json({ error: e.error, error_description: e.description }, e.httpStatus);
+
+/** The login page posts a form and then redirects, so form-action must allow us and the client's redirect origin. */
+const loginCsp = (redirectOrigin: string) =>
+  `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${redirectOrigin}; base-uri 'none'; frame-ancestors 'none'`;
+
 export interface AppDeps {
   cfg: Config;
   chats: ChatService;
   mcp: McpHttpHandler;
+  oauth: OAuthService;
 }
 
-export function createApp({ cfg, chats, mcp }: AppDeps) {
+export function createApp({ cfg, chats, mcp, oauth }: AppDeps) {
+  const isOwner = (req: Request) => isOwnerRequest(req, cfg, oauth);
   const publicOrigin = new URL(cfg.publicUrl).origin;
   const requestLimiter = new RateLimiter(cfg.requestsPerMinute, 60_000);
   const joinLimiter = new RateLimiter(cfg.joinPerHour, 3_600_000);
@@ -74,6 +97,25 @@ export function createApp({ cfg, chats, mcp }: AppDeps) {
     if (origin && origin !== publicOrigin) return errorJson('BAD_ORIGIN', 'Origin not allowed.', 403);
 
     if (path === '/mcp') return mcp.fetch(req);
+    // Owner connector endpoint: same MCP server, but auth is required so OAuth clients
+    // (claude.ai) discover the login flow from the 401. /mcp stays open for guests.
+    if (path === OWNER_MCP_PATH) {
+      if (!isOwner(req)) {
+        return withHeaders(errorJson('UNAUTHORIZED', 'Owner login required.', 401), {
+          'WWW-Authenticate': `Bearer resource_metadata="${oauth.resourceMetadataUrl}"`,
+        });
+      }
+      return mcp.fetch(req);
+    }
+
+    // ---- OAuth (owner connector) ----
+    if (method === 'GET' && (path === '/.well-known/oauth-protected-resource' || path === `/.well-known/oauth-protected-resource${OWNER_MCP_PATH}`)) {
+      return json(oauth.protectedResourceMetadata());
+    }
+    if (method === 'GET' && (path.startsWith('/.well-known/oauth-authorization-server') || path.startsWith('/.well-known/openid-configuration'))) {
+      return json(oauth.authServerMetadata());
+    }
+    if (path.startsWith('/oauth/')) return oauthRoute(req, path, method, ip);
 
     if (method === 'GET' && path === '/') {
       return text('agent-chat relay. If you were sent an invite, open the chat URL it contains.\n');
@@ -88,8 +130,12 @@ export function createApp({ cfg, chats, mcp }: AppDeps) {
     if (method === 'GET' && m) return withHeaders(text(viewHtml(), 'text/html; charset=utf-8'), { 'Content-Security-Policy': HTML_CSP });
 
     // ---- owner API ----
+    if (path === '/api/oauth/revoke' && method === 'POST') {
+      if (!isOwner(req)) return errorJson('UNAUTHORIZED', 'Owner key required.', 401);
+      return json(oauth.revokeAll());
+    }
     if (path === '/api/chats' || /^\/api\/chats\/[0-9a-z]{26}\/close$/.test(path)) {
-      if (!isOwnerRequest(req, cfg)) return errorJson('UNAUTHORIZED', 'Owner key required.', 401);
+      if (!isOwner(req)) return errorJson('UNAUTHORIZED', 'Owner key required.', 401);
       if (method === 'POST' && path === '/api/chats') {
         const b = await body(req);
         const guestLabel = str(b.guest_label) || 'your friend';
@@ -154,6 +200,39 @@ export function createApp({ cfg, chats, mcp }: AppDeps) {
       return json({ chat: chats.endByParticipant(p, str(b.summary)) });
     }
     return errorJson('METHOD', 'Method not allowed.', 405);
+  }
+
+  async function oauthRoute(req: Request, path: string, method: string, ip: string): Promise<Response> {
+    try {
+      if (path === '/oauth/register' && method === 'POST') return json(oauth.register(await body(req), ip), 201);
+      if (path === '/oauth/token' && method === 'POST') return json(oauth.token(await formParams(req)));
+      if (path === '/oauth/authorize' && (method === 'GET' || method === 'POST')) {
+        const params = method === 'GET' ? new URL(req.url).searchParams : await formParams(req);
+        let ar;
+        try {
+          ar = oauth.parseAuthorize(params);
+        } catch (e) {
+          if (e instanceof OAuthError) return withHeaders(text(oauthErrorHtml(e.description), 'text/html; charset=utf-8', 400), { 'Content-Security-Policy': loginCsp("'none'") });
+          throw e;
+        }
+        const redirect = new URL(ar.redirectUri);
+        const csp = { 'Content-Security-Policy': loginCsp(redirect.origin) };
+        const page = (error?: string, status = 200) =>
+          withHeaders(text(oauthLoginHtml({ params, clientName: ar.clientName, redirectHost: redirect.host, error }), 'text/html; charset=utf-8', status), csp);
+        if (method === 'GET') return page();
+        if (params.get('action') === 'deny') return withHeaders(new Response(null, { status: 302, headers: { Location: oauth.denyRedirect(ar) } }), csp);
+        try {
+          return withHeaders(new Response(null, { status: 302, headers: { Location: oauth.approve(ar, params.get('owner_key') ?? '', ip), 'Cache-Control': 'no-store' } }), csp);
+        } catch (e) {
+          if (e instanceof OAuthError) return page(e.description, e.httpStatus);
+          throw e;
+        }
+      }
+      return errorJson('NOT_FOUND', 'Not found.', 404);
+    } catch (e) {
+      if (e instanceof OAuthError) return oauthJsonError(e);
+      throw e;
+    }
   }
 
   return async function handle(req: Request, ip: string): Promise<Response> {

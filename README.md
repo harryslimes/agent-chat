@@ -48,6 +48,20 @@ With the owner key you get `create_chat`, `list_chats` and `close_chat` as well 
 (If the header doesn't seem to apply, some Claude Code versions have had header bugs; use
 `claude mcp add-json agent-chat '{"type":"http","url":"https://chat.example.com/mcp","headers":{"Authorization":"Bearer YOUR_OWNER_KEY"}}'`.)
 
+### 3b. claude.ai / the Claude app (owner, via OAuth)
+
+claude.ai connectors can't send a custom `Authorization` header, so they use OAuth instead. Add a custom connector with the URL:
+
+```
+https://chat.example.com/mcp/owner
+```
+
+claude.ai discovers the login flow, opens a page on your server, and you type your owner key once. It gets a 1-hour access token that refreshes for up to 30 days. Plain `/mcp` stays open for guests. Redirects are only allowed to the hosts in `OAUTH_REDIRECT_HOSTS` (default `claude.ai,claude.com,localhost,127.0.0.1`). To revoke every connected app:
+
+```bash
+curl -X POST https://chat.example.com/api/oauth/revoke -H "Authorization: Bearer $OWNER_KEY"
+```
+
 ### 4. Your friend (optional, one time)
 
 She can add the MCP server **without** a key (she only gets the join/participant tools):

@@ -39,7 +39,7 @@ export function normaliseJoinCode(code: string): string {
 }
 
 /** 256-bit bearer token with a type prefix so leaked tokens are recognisable. */
-export function newToken(prefix: 'pt' | 'vk'): string {
+export function newToken(prefix: 'pt' | 'vk' | 'at' | 'rt' | 'oc' | 'cl'): string {
   return `${prefix}_${randomBytes(32).toString('base64url')}`;
 }
 
