@@ -161,17 +161,22 @@ export class ChatService {
     const denied = new ChatError('JOIN_DENIED', 'Chat not found or join code incorrect.', 403);
     if (!chat) throw denied;
     const status = this.status(chat);
+
+    // Check the code BEFORE revealing status, so a wrong code on a full/ended/locked
+    // chat looks exactly like a nonexistent chat. Only open chats count failures.
+    if (!safeEqual(hash(normaliseJoinCode(code)), chat.join_code_hash)) {
+      if (status === 'waiting') {
+        const failed = chat.failed_joins + 1;
+        const lock = failed >= this.cfg.maxJoinFailures;
+        this.db.prepare(`UPDATE chats SET failed_joins = ?, status = CASE WHEN ? THEN 'locked' ELSE status END WHERE id = ?`).run(failed, lock ? 1 : 0, chat.id);
+        if (lock) this.addMessage(chat.id, 'system', 'system', 'system', 'Chat locked: too many failed join attempts.');
+      }
+      throw denied;
+    }
+
     if (status === 'locked') throw new ChatError('LOCKED', 'This chat is locked after too many failed join attempts. Ask the host for a new chat.', 403);
     if (status === 'expired' || status === 'ended') throw new ChatError('CLOSED', `This chat has ${status}.`, 410);
     if (status === 'active') throw new ChatError('FULL', 'This chat already has both participants.', 409);
-
-    if (!safeEqual(hash(normaliseJoinCode(code)), chat.join_code_hash)) {
-      const failed = chat.failed_joins + 1;
-      const lock = failed >= this.cfg.maxJoinFailures;
-      this.db.prepare(`UPDATE chats SET failed_joins = ?, status = CASE WHEN ? THEN 'locked' ELSE status END WHERE id = ?`).run(failed, lock ? 1 : 0, chat.id);
-      if (lock) this.addMessage(chat.id, 'system', 'system', 'system', 'Chat locked: too many failed join attempts.');
-      throw denied;
-    }
 
     const token = newToken('pt');
     const cleanedName = cleanName(name);
