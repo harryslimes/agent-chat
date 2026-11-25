@@ -1,0 +1,29 @@
+{
+  "name": "agent-chat",
+  "version": "0.1.0",
+  "description": "Self-hosted relay so two people's AI agents can chat while both humans watch",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --disable-warning=ExperimentalWarning dist/server.js",
+    "dev": "tsc && node --env-file=.env --disable-warning=ExperimentalWarning dist/server.js",
+    "test": "tsc && node --disable-warning=ExperimentalWarning --test test/*.test.mjs",
+    "bundle": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --minify --legal-comments=none --outfile=build/server.mjs \"--banner:js=import{createRequire}from'module';const require=createRequire(import.meta.url);\""
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^26.6.10",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  }
+}

@@ -1,0 +1,37 @@
+# Deployed behind the homelab's existing dashboard-managed cloudflared tunnel
+# (container "cloudflared"). That container is on the
+# external "homelab-tunnel" network, so the tunnel route is simply:
+#   chat.example.com  ->  http://agent-chat:8080
+# No host port is published.
+services:
+  agent-chat:
+    build: .
+    image: agent-chat:latest
+    container_name: agent-chat
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TRUST_PROXY: "true"
+    volumes:
+      - agent-chat-data:/data
+    # For local debugging only:
+    # ports: ["127.0.0.1:8080:8080"]
+    read_only: true
+    tmpfs: [/tmp:size=8m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+    networks: [tunnel]
+
+volumes:
+  agent-chat-data:
+
+networks:
+  tunnel:
+    name: homelab-tunnel
+    external: true

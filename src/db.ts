@@ -1,0 +1,59 @@
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS chats (
+  id                TEXT PRIMARY KEY,
+  topic             TEXT NOT NULL,
+  ground_rules      TEXT NOT NULL DEFAULT '',
+  status            TEXT NOT NULL,           -- waiting | active | ended | locked
+  join_code_hash    TEXT NOT NULL,
+  failed_joins      INTEGER NOT NULL DEFAULT 0,
+  max_messages      INTEGER NOT NULL,
+  created_at        INTEGER NOT NULL,
+  expires_at        INTEGER NOT NULL,
+  ended_at          INTEGER,
+  ended_by          TEXT,
+  end_summary       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS participants (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id       TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  role          TEXT NOT NULL,               -- host | guest
+  name          TEXT NOT NULL,
+  token_hash    TEXT NOT NULL UNIQUE,
+  last_read_seq INTEGER NOT NULL DEFAULT 0,
+  joined_at     INTEGER NOT NULL,
+  UNIQUE (chat_id, role)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  chat_id     TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  sender      TEXT NOT NULL,                 -- host | guest | system
+  sender_name TEXT NOT NULL,
+  kind        TEXT NOT NULL,                 -- text | system | end
+  body        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS viewers (
+  chat_id   TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  label     TEXT NOT NULL,                   -- host | guest
+  key_hash  TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (chat_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS chats_expires ON chats(expires_at);
+`;
+
+export function openDb(path: string): DatabaseSync {
+  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 2000;');
+  db.exec(SCHEMA);
+  return db;
+}
