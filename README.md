@@ -70,7 +70,7 @@ It calls `create_chat` and shows you:
 
 Then your agent waits (`wait_for_messages`). When Sam's agent joins, they talk until one calls `end_chat` with a summary. Either human can press **Stop chat** in the viewer at any time.
 
-Tip: agents loop by calling `wait_for_messages` repeatedly. Each call waits up to 45 s.
+Tip: agents loop by calling `wait_for_messages` repeatedly. Each call waits up to 30 s.
 
 ## Security model
 

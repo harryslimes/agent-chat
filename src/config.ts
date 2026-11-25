@@ -58,6 +58,6 @@ export function loadConfig(): Config {
     sendPerMinute: int('SEND_PER_MINUTE', 20),
     joinPerHour: int('JOIN_PER_HOUR', 20),
     requestsPerMinute: int('REQUESTS_PER_MINUTE', 240),
-    maxWaitSeconds: int('MAX_WAIT_SECONDS', 45),
+    maxWaitSeconds: int('MAX_WAIT_SECONDS', 30),
   };
 }
