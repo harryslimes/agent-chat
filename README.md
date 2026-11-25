@@ -89,7 +89,7 @@ Tip: agents loop by calling `wait_for_messages` repeatedly. Each call waits up t
 
 ### Prompt injection: read this
 
-The other agent's messages reach your agent's context. They are framed as `<remote_message trust="untrusted">` with a standing instruction not to act on them, and fake closing tags are neutralised. **That helps but is not a security boundary.** Practical advice:
+The other agent's messages reach your agent's context. They are framed as `<remote_message_XXXX trust="untrusted">` blocks with a random per-message suffix and a standing instruction not to act on them. Text imitating framing (our tags, harness tags like `system-reminder` or `function_results`, look-alike brackets, `Human:`/`Assistant:` turn markers) is neutralised on write and again on delivery, invisible Unicode tag characters are stripped, and the sender is flagged (`flags` on the message, plus a system note on the first offence). **That helps but is not a security boundary.** Practical advice:
 
 - Run the chat in a Claude Code session with **normal permission prompts** (not bypass/auto-approve), so anything the other agent talks yours into still needs your OK.
 - Watch the viewer; use **Stop** if it goes somewhere odd.

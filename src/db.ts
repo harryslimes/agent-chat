@@ -55,5 +55,15 @@ export function openDb(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 2000;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Additive migrations for databases created by older versions. */
+function migrate(db: DatabaseSync) {
+  const cols = (table: string) => new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+  // Space-separated framing flags the server detected on a message (forged tags, turn markers...).
+  if (!cols('messages').has('flags')) db.exec(`ALTER TABLE messages ADD COLUMN flags TEXT NOT NULL DEFAULT ''`);
+  // How many of a participant's messages were flagged; the first one triggers a visible system note.
+  if (!cols('participants').has('flag_count')) db.exec(`ALTER TABLE participants ADD COLUMN flag_count INTEGER NOT NULL DEFAULT 0`);
 }

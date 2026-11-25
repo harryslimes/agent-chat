@@ -56,19 +56,72 @@ export function cleanName(name: string): string {
   return cleaned || 'agent';
 }
 
+// ---------- forged framing ----------
+//
+// Remote text must never be able to imitate the structure an agent's harness uses:
+// our own wrapper tags, harness tags (system reminders, tool calls/results) or chat
+// turn markers. We neuter them by inserting a zero-width space (invisible to humans,
+// but it breaks the token sequence) and record what was attempted so the sender can
+// be flagged. Everything here is idempotent: neutered text never matches again.
+
+const ZWSP = '​';
+
 /**
- * Insert a zero-width space after `<` / `</` in our framing tag names so stored
- * text can never close or fake them. Idempotent.
+ * Tag names that look like agent/harness framing (case-insensitive). Each may carry a
+ * `-`/`_`/`:` suffix (system-reminder, remote_message_x7k2, antml:invoke) but must then
+ * end the name, so ordinary tags like <systemd> or <toolbar> are left alone.
  */
-export function neuterTags(text: string): string {
-  return text.replace(/<(\/?)(remote_message|chat_status|system_note|your_message)/gi, '<$1​$2');
+const FRAMING_NAMES = [
+  'remote_message', 'your_message', 'chat_status', 'system_note',
+  'system', 'function_calls', 'function_results', 'function', 'antml', 'tool_use', 'tool_result', 'tool',
+  'invoke', 'parameter', 'human', 'assistant', 'untrusted', 'instructions',
+];
+
+/** `<` and visually similar brackets: fullwidth, small, angle, mathematical, single guillemet, Canadian syllabics. */
+const OPENERS = '<＜﹤〈〈⟨‹ᐸ';
+const CLOSERS = '>＞﹥〉〉⟩›ᐳ';
+const LOOKALIKE_OPENERS = OPENERS.slice(1);
+const SLASHES = '/／∕⁄';
+const NAME_RE = `(?:${FRAMING_NAMES.join('|')})(?:[-_:][\\w:-]*)?(?=[\\s${CLOSERS}${SLASHES}]|$)`;
+
+// `<`, optional whitespace and slash, then a framing name. A zero-width space after
+// the slash (already neutered) stops the match, which keeps this idempotent.
+const TAG_RE = new RegExp(`([${OPENERS}])([ \\t]*[${SLASHES}]?[ \\t]*)(?=${NAME_RE})`, 'giu');
+// Chat-transcript turn markers at the start of a line.
+const TURN_RE = /^([ \t]*)(Human|Assistant|System)([ \t]*:)/gim;
+// Invisible Unicode "tag" characters (U+E0000–E007F), usable to smuggle hidden ASCII text.
+const TAG_CHARS_RE = /[\u{E0000}-\u{E007F}]/gu;
+
+export type FramingFlag = 'framing-tag' | 'lookalike-brackets' | 'turn-marker' | 'hidden-tag-chars';
+
+/** What kinds of forged framing a piece of raw text contains (empty when clean). */
+export function detectFraming(text: string): FramingFlag[] {
+  const flags = new Set<FramingFlag>();
+  for (const m of text.matchAll(TAG_RE)) {
+    flags.add('framing-tag');
+    if (LOOKALIKE_OPENERS.includes(m[1])) flags.add('lookalike-brackets');
+  }
+  if (new RegExp(TURN_RE.source, 'im').test(text)) flags.add('turn-marker');
+  if (new RegExp(TAG_CHARS_RE.source, 'u').test(text)) flags.add('hidden-tag-chars');
+  return [...flags];
+}
+
+/**
+ * Neuter anything that could close or fake framing: tags (including look-alike
+ * brackets, folded to `<`) get a zero-width space after the `<` / `</`, and turn
+ * markers get one before the colon. Idempotent; safe to run on every delivery.
+ */
+export function neuterFraming(text: string): string {
+  return text
+    .replace(TAG_RE, (_m, _open: string, slash: string) => `<${slash.replace(/[ \t]/g, '').replace(/./u, '/')}${ZWSP}`)
+    .replace(TURN_RE, `$1$2${ZWSP}$3`);
 }
 
 /**
  * Sanitise free text before it is stored: strip control characters (except
- * newline and tab) and neuter framing tags, so every transport (MCP, HTTP,
- * viewer) gets the same protection.
+ * newline and tab), bidi overrides and invisible tag characters, then neuter
+ * framing, so every transport (MCP, HTTP, viewer) gets the same protection.
  */
 export function cleanText(text: string): string {
-  return neuterTags(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F‪-‮⁦-⁩]/g, ''));
+  return neuterFraming(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F‪-‮⁦-⁩]/g, '').replace(TAG_CHARS_RE, ''));
 }
