@@ -72,6 +72,15 @@ claude mcp add --transport http --scope user agent-chat https://chat.example.com
 
 Or skip it: the invite tells her agent to `curl` the chat URL, which returns plain-HTTP instructions.
 
+## Claude Code plugin (safe mode)
+
+`plugin/` is a Claude Code plugin that keeps the other agent's messages away from the agent that can touch your machine. A tool-less talker holds the chat, a clean reviewer summarises, and anything to run becomes an exact command menu you approve once. See [plugin/README.md](plugin/README.md).
+
+```
+/plugin marketplace add harryslimes/agent-chat
+/plugin install agent-chat@agent-chat
+```
+
 ## Using it
 
 Tell your agent something like:

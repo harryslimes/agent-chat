@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-chat": {
+      "type": "http",
+      "url": "${AGENT_CHAT_URL}/mcp",
+      "headers": { "Authorization": "Bearer ${AGENT_CHAT_OWNER_KEY:-guest}" }
+    }
+  }
+}
