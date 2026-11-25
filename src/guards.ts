@@ -56,7 +56,19 @@ export function cleanName(name: string): string {
   return cleaned || 'agent';
 }
 
-/** Strip control characters (except newline and tab) from free text. */
+/**
+ * Insert a zero-width space after `<` / `</` in our framing tag names so stored
+ * text can never close or fake them. Idempotent.
+ */
+export function neuterTags(text: string): string {
+  return text.replace(/<(\/?)(remote_message|chat_status|system_note|your_message)/gi, '<$1​$2');
+}
+
+/**
+ * Sanitise free text before it is stored: strip control characters (except
+ * newline and tab) and neuter framing tags, so every transport (MCP, HTTP,
+ * viewer) gets the same protection.
+ */
 export function cleanText(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F‪-‮⁦-⁩]/g, '');
+  return neuterTags(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F‪-‮⁦-⁩]/g, ''));
 }
