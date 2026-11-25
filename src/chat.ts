@@ -25,6 +25,7 @@ interface ChatRow {
   ended_at: number | null;
   ended_by: string | null;
   end_summary: string | null;
+  self_chat: number;
 }
 
 interface ParticipantRow {
@@ -68,6 +69,8 @@ export interface ChatInfo {
   maxMessages: number;
   endedBy: string | null;
   endSummary: string | null;
+  /** Between the owner's own agents: joinable by any owner-authenticated agent without a code. */
+  selfChat: boolean;
 }
 
 export interface Participant {
@@ -83,6 +86,7 @@ export interface CreateChatInput {
   hostName?: string;
   ttlHours?: number;
   maxMessages?: number;
+  selfChat?: boolean;
 }
 
 export interface CreatedChat {
@@ -126,10 +130,10 @@ export class ChatService {
     try {
       this.db
         .prepare(
-          `INSERT INTO chats (id, topic, ground_rules, status, join_code_hash, max_messages, created_at, expires_at)
-           VALUES (?, ?, ?, 'waiting', ?, ?, ?, ?)`,
+          `INSERT INTO chats (id, topic, ground_rules, status, join_code_hash, max_messages, created_at, expires_at, self_chat)
+           VALUES (?, ?, ?, 'waiting', ?, ?, ?, ?, ?)`,
         )
-        .run(chatId, topic, groundRules, hash(normaliseJoinCode(joinCode)), maxMessages, now, expiresAt);
+        .run(chatId, topic, groundRules, hash(normaliseJoinCode(joinCode)), maxMessages, now, expiresAt, input.selfChat ? 1 : 0);
       this.db
         .prepare(`INSERT INTO participants (chat_id, role, name, token_hash, joined_at) VALUES (?, 'host', ?, ?, ?)`)
         .run(chatId, cleanName(input.hostName ?? 'host agent'), hash(hostToken), now);
@@ -181,6 +185,33 @@ export class ChatService {
     if (status === 'expired' || status === 'ended') throw new ChatError('CLOSED', `This chat has ${status}.`, 410);
     if (status === 'active') throw new ChatError('FULL', 'This chat already has both participants.', 409);
 
+    return this.takeGuestSeat(chat, name);
+  }
+
+  /**
+   * Owner-authenticated join of a self chat (the owner's own agents on different devices).
+   * No code needed: the caller already proved it is the owner. Without a chat ID, joins
+   * the newest self chat still waiting for its second agent. Ordinary chats are never
+   * joinable this way, so an owner device can't take a seat meant for someone else.
+   */
+  joinAsOwner(chatId: string | undefined, name: string): { token: string; participant: Participant; chat: ChatInfo } {
+    let chat: ChatRow | undefined;
+    if (chatId) {
+      chat = this.findChat(chatId);
+      if (!chat) throw new ChatError('NOT_FOUND', 'Chat not found.', 404);
+      if (!chat.self_chat) throw new ChatError('NOT_SELF_CHAT', 'That chat was made for someone else; join it with its join code.', 403);
+    } else {
+      chat = this.db.prepare(`SELECT * FROM chats WHERE self_chat = 1 AND status = 'waiting' AND expires_at > ? ORDER BY created_at DESC LIMIT 1`).get(Date.now()) as unknown as ChatRow | undefined;
+      if (!chat) throw new ChatError('NO_SELF_CHAT', 'No self chat is waiting. Create one on the other device with create_chat(self_chat: true).', 404);
+    }
+    const status = this.status(chat);
+    if (status === 'expired' || status === 'ended') throw new ChatError('CLOSED', `This chat has ${status}.`, 410);
+    if (status === 'active') throw new ChatError('FULL', 'This chat already has both participants.', 409);
+    if (status === 'locked') throw new ChatError('LOCKED', 'This chat is locked.', 403);
+    return this.takeGuestSeat(chat, name);
+  }
+
+  private takeGuestSeat(chat: ChatRow, name: string): { token: string; participant: Participant; chat: ChatInfo } {
     const token = newToken('pt');
     const cleanedName = cleanName(name);
     this.db.exec('BEGIN');
@@ -337,6 +368,7 @@ export class ChatService {
       maxMessages: c.max_messages,
       endedBy: c.ended_by,
       endSummary: c.end_summary === null ? null : neuterFraming(c.end_summary),
+      selfChat: !!c.self_chat,
     };
   }
 

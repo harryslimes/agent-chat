@@ -89,5 +89,7 @@ function migrate(db: DatabaseSync) {
   // Space-separated framing flags the server detected on a message (forged tags, turn markers...).
   if (!cols('messages').has('flags')) db.exec(`ALTER TABLE messages ADD COLUMN flags TEXT NOT NULL DEFAULT ''`);
   // How many of a participant's messages were flagged; the first one triggers a visible system note.
+  // Self chats: between the owner's own agents; any owner-authenticated agent may take the second seat without a code.
+  if (!cols('chats').has('self_chat')) db.exec(`ALTER TABLE chats ADD COLUMN self_chat INTEGER NOT NULL DEFAULT 0`);
   if (!cols('participants').has('flag_count')) db.exec(`ALTER TABLE participants ADD COLUMN flag_count INTEGER NOT NULL DEFAULT 0`);
 }

@@ -65,11 +65,28 @@ function buildServer(chats: ChatService, cfg: Config, isOwner: boolean, signal?:
           ground_rules: z.string().max(1000).optional().describe('Optional rules shown to both agents every turn, e.g. "No secrets; config snippets only".'),
           ttl_hours: z.number().positive().optional().describe(`How long the chat stays open (default ${cfg.defaultTtlHours}, max ${cfg.maxTtlHours}).`),
           max_messages: z.number().int().positive().optional().describe(`Message cap (default and max ${cfg.maxMessages}).`),
+          self_chat: z.boolean().default(false).describe('True for a chat between your own agents (e.g. your Claude Code on another device). No invite needed: the other agent, signed in as owner too, calls join_chat without a code.'),
         }),
       },
       async (a) =>
         run(() => {
-          const created = chats.createChat({ topic: a.topic, groundRules: a.ground_rules, hostName: a.host_name, ttlHours: a.ttl_hours, maxMessages: a.max_messages });
+          const created = chats.createChat({ topic: a.topic, groundRules: a.ground_rules, hostName: a.host_name, ttlHours: a.ttl_hours, maxMessages: a.max_messages, selfChat: a.self_chat });
+          if (a.self_chat) {
+            return ok(
+              [
+                `Self chat created: ${a.topic}`,
+                ``,
+                `On your other device, in an agent signed in as the owner, say: "join my agent chat". It calls join_chat with no code${' '}`,
+                `(optionally chat="${created.chatId}"; with no chat it joins the newest waiting self chat).`,
+                ``,
+                `Private viewer link for your user: ${cfg.publicUrl}/c/${created.chatId}/view#k=${created.hostViewerKey}`,
+                ``,
+                `Your participant token (keep private, use it in send_message / wait_for_messages / end_chat): ${created.hostToken}`,
+                `Chat ID: ${created.chatId}. Expires ${created.expiresAt}.`,
+                `Next: call wait_for_messages with your token to wait for your other agent to join.`,
+              ].join('\n'),
+            );
+          }
           return ok(
             [
               `Chat created. Show your user BOTH blocks below.`,
@@ -96,7 +113,7 @@ function buildServer(chats: ChatService, cfg: Config, isOwner: boolean, signal?:
         run(() => {
           const list = chats.listChats();
           if (!list.length) return ok('No chats yet.');
-          return ok(list.map((c) => `${c.id}  ${c.status.padEnd(7)}  ${c.messageCount}/${c.maxMessages} msgs  expires ${c.expiresAt}  ${c.topic}`).join('\n'));
+          return ok(list.map((c) => `${c.id}  ${c.status.padEnd(7)}  ${c.selfChat ? 'self ' : 'guest'}  ${c.messageCount}/${c.maxMessages} msgs  expires ${c.expiresAt}  ${c.topic}`).join('\n'));
         }),
     );
 
@@ -115,16 +132,23 @@ function buildServer(chats: ChatService, cfg: Config, isOwner: boolean, signal?:
     'join_chat',
     {
       title: 'Join an agent chat',
-      description: 'Join a chat you were invited to, using the chat URL and join code from the invite. Returns your participant token and the conversation so far.',
+      description: isOwner
+        ? 'Join a chat. With an invite: pass the chat URL and join code. For a self chat (between your own agents, created with self_chat: true): no code needed; pass the chat ID, or nothing to join the newest waiting self chat. Returns your participant token and the conversation so far.'
+        : 'Join a chat you were invited to, using the chat URL and join code from the invite. Returns your participant token and the conversation so far.',
       inputSchema: z.object({
-        chat: z.string().describe('The chat URL from the invite (or the bare chat ID).'),
-        join_code: z.string().describe('The join code from the invite, e.g. "7KQ2M-X9D4F".'),
+        chat: (isOwner ? z.string().optional() : z.string()).describe('The chat URL from the invite (or the bare chat ID).'),
+        join_code: (isOwner ? z.string().optional() : z.string()).describe('The join code from the invite, e.g. "7KQ2M-X9D4F".' + (isOwner ? ' Omit for a self chat.' : '')),
         name: z.string().max(40).describe('Your display name, e.g. "Sam\'s agent".'),
       }),
     },
     async (a) =>
       run(async () => {
-        const { token: t, participant } = chats.join(parseChatRef(a.chat), a.join_code, a.name);
+        const ref = a.chat ? parseChatRef(a.chat) : '';
+        const { token: t, participant } = a.join_code
+          ? chats.join(ref, a.join_code, a.name)
+          : isOwner
+            ? chats.joinAsOwner(ref || undefined, a.name)
+            : (() => { throw new ChatError('BAD_INPUT', 'join_code is required.'); })();
         const { messages, chat } = chats.history(participant);
         return ok(`Joined. Your participant token (keep private): ${t}\n\n` + renderForAgent(messages, chat, participant));
       }),

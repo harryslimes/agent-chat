@@ -309,3 +309,42 @@ test('owner connector OAuth: discovery, registration, login, PKCE, tokens, refre
   assert.equal((await api('/api/oauth/revoke', { method: 'POST', token: OWNER_KEY })).status, 200);
   assert.equal((await fetch(`${BASE}/mcp/owner`, { method: 'POST', headers: { Authorization: `Bearer ${t2.data.access_token}`, 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
 });
+
+test('self chats: an owner agent on another device joins with no code; others cannot', async () => {
+  const deviceA = await mcpClient({ Authorization: `Bearer ${OWNER_KEY}` });
+  const deviceB = await mcpClient({ Authorization: `Bearer ${OWNER_KEY}` });
+  const guest = await mcpClient();
+
+  // An ordinary chat can't be joined code-free, even by the owner.
+  const normal = await call(deviceA, 'create_chat', { topic: 'for Tom' });
+  const normalId = normal.text.match(/Chat ID: (\S+)\./)[1];
+  assert.match((await call(deviceB, 'join_chat', { chat: normalId, name: 'B' })).text, /NOT_SELF_CHAT/);
+
+  // Self chat: device B joins with no arguments at all (newest waiting self chat).
+  const created = await call(deviceA, 'create_chat', { topic: 'laptop <-> desktop', self_chat: true });
+  assert.match(created.text, /Self chat created/);
+  assert.doesNotMatch(created.text, /Join code/, 'no invite or code for self chats');
+  const tokenA = created.text.match(/token \(keep private.*?\): (pt_\S+)/)[1];
+
+  // A guest (no owner auth) can't join without the code.
+  const g = await call(guest, 'join_chat', { chat: created.text.match(/Chat ID: (\S+)\./)[1], name: 'x' });
+  assert.equal(g.isError, true);
+
+  const joined = await call(deviceB, 'join_chat', { name: 'Desktop Claude' });
+  assert.equal(joined.isError, false, joined.text);
+  const tokenB = joined.text.match(/token \(keep private\): (pt_\S+)/)[1];
+
+  // They can talk.
+  await call(deviceA, 'wait_for_messages', { token: tokenA, wait_seconds: 0 });
+  assert.equal((await call(deviceA, 'send_message', { token: tokenA, text: 'hello from the laptop' })).isError, false);
+  assert.match((await call(deviceB, 'wait_for_messages', { token: tokenB, wait_seconds: 2 })).text, /hello from the laptop/);
+
+  // Seat taken: a third owner device can't join it.
+  assert.match((await call(deviceA, 'join_chat', { chat: created.text.match(/Chat ID: (\S+)\./)[1], name: 'C' })).text, /FULL/);
+  assert.match((await call(deviceA, 'list_chats', {})).text, /active\s+self/);
+
+  // Same over HTTP: owner bearer, no code.
+  const c = await api('/api/chats', { method: 'POST', token: OWNER_KEY, body: { topic: 'http self', self_chat: true } });
+  assert.equal((await api(`/api/chats/${c.data.chat_id}/join`, { method: 'POST', body: { name: 'anon' } })).status, 403, 'no code, no owner auth');
+  assert.equal((await api(`/api/chats/${c.data.chat_id}/join`, { method: 'POST', token: OWNER_KEY, body: { name: 'B' } })).status, 200);
+});

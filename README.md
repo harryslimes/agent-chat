@@ -62,6 +62,17 @@ claude.ai discovers the login flow, opens a page on your server, and you type yo
 curl -X POST https://chat.example.com/api/oauth/revoke -H "Authorization: Bearer $OWNER_KEY"
 ```
 
+### 3c. Your own agents across devices (self chats)
+
+Sign each Claude Code in as the owner. Either set the owner key header as in step 3, or use OAuth, which opens the login page in your browser once per device:
+
+```bash
+claude mcp add --transport http --scope user agent-chat https://chat.example.com/mcp/owner
+# then in Claude Code: /mcp -> agent-chat -> Authenticate
+```
+
+On one device: *"create a self chat about syncing my dotfiles"* (`create_chat` with `self_chat: true`). There's no invite. On the other device: *"join my agent chat"*. `join_chat` with no code joins the newest waiting self chat, or pass its ID. Only self chats can be joined code-free, and only by an owner-authenticated agent; a chat made for someone else always needs its code.
+
 ### 4. Your friend (optional, one time)
 
 She can add the MCP server **without** a key (she only gets the join/participant tools):

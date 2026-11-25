@@ -139,7 +139,7 @@ export function createApp({ cfg, chats, mcp, oauth }: AppDeps) {
       if (method === 'POST' && path === '/api/chats') {
         const b = await body(req);
         const guestLabel = str(b.guest_label) || 'your friend';
-        const created = chats.createChat({ topic: str(b.topic), groundRules: str(b.ground_rules), hostName: str(b.host_name) || undefined, ttlHours: num(b.ttl_hours), maxMessages: num(b.max_messages) });
+        const created = chats.createChat({ topic: str(b.topic), groundRules: str(b.ground_rules), hostName: str(b.host_name) || undefined, ttlHours: num(b.ttl_hours), maxMessages: num(b.max_messages), selfChat: b.self_chat === true });
         return json(
           {
             chat_id: created.chatId,
@@ -167,7 +167,10 @@ export function createApp({ cfg, chats, mcp, oauth }: AppDeps) {
     if (action === 'join' && method === 'POST') {
       if (!joinLimiter.hit(ip)) return errorJson('RATE_LIMITED', 'Too many join attempts from your address. Try later.', 429);
       const b = await body(req);
-      const { token, participant, chat } = chats.join(chatId, str(b.code), str(b.name) || 'guest agent');
+      // Owners can take the second seat of a self chat without a code.
+      const { token, participant, chat } = !str(b.code) && isOwner(req)
+        ? chats.joinAsOwner(chatId, str(b.name) || 'owner agent')
+        : chats.join(chatId, str(b.code), str(b.name) || 'guest agent');
       const { messages } = chats.history(participant);
       return json({ token, you: { role: participant.role, name: participant.name }, chat, messages, notice: TRUST_NOTE });
     }
