@@ -5,7 +5,7 @@
 
 import { existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { APPROVAL_TTL_MS, APPROVED, canonical, clearPending, clearResults, ensureDirs, PENDING, readJson, renderPlan, sha256, validatePlan, writeJson } from './lib.mjs';
+import { APPROVAL_TTL_MS, APPROVED, canonical, clearPending, ensureDirs, revokeApprovedExcept, startResults, PENDING, readJson, renderPlan, sha256, validatePlan, writeJson } from './lib.mjs';
 
 const id = (process.argv[2] || '').trim();
 if (!/^[0-9a-f]{12}$/.test(id)) {
@@ -32,6 +32,7 @@ const now = Date.now();
 writeJson(join(APPROVED, `${id}.json`), { ...rec, approved_at: now, expires_at: now + APPROVAL_TTL_MS, runs: {} });
 unlinkSync(pendingFile);
 clearPending();
-clearResults(id);
+revokeApprovedExcept(id);
+startResults(id, rec.plan);
 console.log(`APPROVED by the user until ${new Date(now + APPROVAL_TTL_MS).toLocaleTimeString()}:\n`);
 console.log(renderPlan(rec.plan, id));

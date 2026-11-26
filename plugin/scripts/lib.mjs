@@ -114,6 +114,8 @@ export function validatePlan(plan) {
       if (/[^\x20-\x7e]/.test(arg)) errs.push(`step ${s.id}: arguments must be printable ASCII (no control, escape or bidi characters)`);
       if (arg.length > 300) errs.push(`step ${s.id}: argument too long`);
       for (const f of FORBIDDEN_ARGS) if (f.prog === prog && f.re.test(arg)) errs.push(`step ${s.id}: ${prog} ${arg} can run code or write files; not allowed`);
+      if (/[;&|<>`$(){}\\*?~!#]/.test(arg.replace(VAR_RE, ''))) errs.push(`step ${s.id}: ${JSON.stringify(arg)} contains shell characters (; & | < > ` + '`' + ` $ ( ) { } \\ * ? ~ ! #) that the guard refuses, so it could never run. Rewrite without them`);
+      VAR_RE.lastIndex = 0;
       for (const m of arg.matchAll(VAR_RE)) if (!vars.has(m[1])) errs.push(`step ${s.id}: undeclared variable {{${m[1]}}}`);
     }
     if (!s.justification || String(s.justification).trim().length < 10) errs.push(`step ${s.id}: needs a justification`);
@@ -297,6 +299,27 @@ export function clearResults(id) {
   rmSync(id ? join(RESULTS, `${id}.json`) : RESULTS, { force: true, recursive: !id });
 }
 
+/** Only one plan is approved at a time: approving a new one revokes the rest and their results. */
+export function revokeApprovedExcept(id) {
+  let names = [];
+  try {
+    names = readdirSync(APPROVED);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (n.startsWith(id)) continue;
+    rmSync(join(APPROVED, n), { force: true });
+    clearResults(n.slice(0, 12));
+  }
+}
+
+/** Start a fresh results log for a newly approved plan, listing its steps so unrun ones can be reported. */
+export function startResults(id, plan) {
+  ensureDirs();
+  writeJson(join(RESULTS, `${id}.json`), { id, planned: plan.steps.map((s) => ({ id: s.id, share: s.share === true })), steps: [] });
+}
+
 /** One staged plan by id, if fresh and untampered. */
 export function stagedPlan(id, now = Date.now()) {
   return stagedPlans(now).find(({ rec }) => rec.hash.startsWith(id)) || null;
@@ -376,8 +399,11 @@ export function buildShareText(id, opts = defaultRedactOpts()) {
   const fmt = (argv) => redact(argv.join(' '), opts);
   const shared = log.steps.filter((s) => s.share).map((s) => ({ ...s, text: redact(s.output, opts) }));
   const withheld = [...new Set(log.steps.filter((s) => !s.share).map((s) => s.id))];
+  const ran = new Set(log.steps.map((s) => s.id));
+  const notRun = (log.planned || []).filter((p) => !ran.has(p.id)).map((p) => p.id);
   const out = [`Results of the approved plan ${id} (filtered by code for secrets, paths, usernames, hostnames and emails; size-capped):`];
   for (const s of fitOutputs(shared)) out.push('', `$ ${fmt(s.argv)}  [${s.id}]${s.exit ? ` (exit ${s.exit})` : ''}`, s.text.trimEnd() || '(no output)');
   if (withheld.length) out.push('', `Ran but not shared (for the user only): ${withheld.join(', ')}`);
+  if (notRun.length) out.push('', `Not run (blocked by the guard, skipped by a branch condition, or the run stopped): ${notRun.join(', ')}`);
   return out.join('\n');
 }

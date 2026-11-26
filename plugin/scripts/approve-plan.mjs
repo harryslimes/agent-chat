@@ -5,7 +5,7 @@
 //   node approve-plan.mjs <plan id>
 
 import { join } from 'node:path';
-import { APPROVAL_TTL_MS, APPROVED, clearPending, clearResults, ensureDirs, renderPlan, stagedPlan, validatePlan, writeJson } from './lib.mjs';
+import { APPROVAL_TTL_MS, APPROVED, clearPending, ensureDirs, renderPlan, revokeApprovedExcept, stagedPlan, startResults, validatePlan, writeJson } from './lib.mjs';
 
 const id = (process.argv[2] || '').trim();
 if (!/^[0-9a-f]{12}$/.test(id)) {
@@ -22,6 +22,7 @@ const now = Date.now();
 const { asked, runs, ...base } = staged.rec;
 writeJson(join(APPROVED, `${id}.json`), { ...base, approved_at: now, approved_via: 'permission-prompt', expires_at: now + APPROVAL_TTL_MS, runs: {} });
 clearPending();
-clearResults(id);
+revokeApprovedExcept(id);
+startResults(id, staged.rec.plan);
 console.log(`APPROVED by the user until ${new Date(now + APPROVAL_TTL_MS).toLocaleTimeString()}:\n`);
 console.log(renderPlan(staged.rec.plan, id));

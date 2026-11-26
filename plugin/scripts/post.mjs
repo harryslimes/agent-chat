@@ -30,7 +30,7 @@ for (const { rec } of activePlans(now)) {
   if (!step) continue;
   const id = rec.hash.slice(0, 12);
   const path = join(RESULTS, `${id}.json`);
-  let log = { id, steps: [] };
+  let log = { id, planned: rec.plan.steps.map((s) => ({ id: s.id, share: s.share === true })), steps: [] };
   try {
     log = JSON.parse(readFileSync(path, 'utf8'));
   } catch {}

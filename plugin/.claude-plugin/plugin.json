@@ -1,6 +1,6 @@
 {
   "name": "agent-chat",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Safe agent-to-agent chat for Claude Code. The remote agent's messages only reach a talker subagent with no tools besides the chat; a clean reviewer summarises; commands for your machine become an exact menu you approve with one Allow prompt, and shared outputs go back filtered by code.",
   "author": { "name": "harryslimes" },
   "homepage": "https://github.com/harryslimes/agent-chat",

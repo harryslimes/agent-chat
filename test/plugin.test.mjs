@@ -213,7 +213,34 @@ test('shared outputs go back filtered, size-capped and exactly; old results are 
   // Same plan approved again later (e.g. a different chat): last time's outputs are gone.
   id = stage(plan);
   script('approve-plan.mjs', '', [id]);
-  assert.match(script('share-results.mjs', '', [id]).stderr, /No recorded results/);
+  const again = script('share-results.mjs', '', [id]).stdout;
+  assert.ok(!again.includes('[truncated'), 'old outputs gone');
+  assert.match(again, /Not run \(blocked by the guard.*\): pub, priv/, 'unrun steps are reported');
+});
+
+test('approving a new plan revokes older approvals, so runs and outputs land on the new plan', () => {
+  reset();
+  const old = stage({ goal: 'old', steps: [{ id: 'ls', argv: ['ls', '-la'], justification: 'List the folder.', share: true }] });
+  script('approve-plan.mjs', '', [old]);
+  const fresh = stage({ goal: 'new', steps: [
+    { id: 'ls', argv: ['ls', '-la'], justification: 'List the folder again.', share: true },
+    { id: 'tree', argv: ['find', '.', '-maxdepth', '2'], justification: 'Directory tree.', share: true },
+  ] });
+  script('approve-plan.mjs', '', [fresh]);
+  assert.equal(guard('Bash', { command: 'ls -la' }, EX), 'allow');
+  post('Bash', { command: 'ls -la' }, EX, { stdout: 'listing' });
+  const out = script('share-results.mjs', '', [fresh]).stdout;
+  assert.match(out, /\$ ls -la  \[ls\]\nlisting/, 'output filed under the new plan');
+  assert.match(out, /Not run .*: tree/);
+  assert.match(script('share-results.mjs', '', [old]).stderr, /No recorded results/, 'old plan revoked and its results cleared');
+});
+
+test('plans with arguments the guard can never run are rejected at staging', () => {
+  const v = (argv) => lib.validatePlan({ steps: [{ id: 'x', argv, justification: 'because reasons here' }] });
+  for (const bad of [['find', '.', '-path', '*/node_modules*'], ['grep', 'a|b', 'f'], ['grep', 'a\\|b', 'f'], ['ls', '~']]) {
+    assert.ok(v(bad).some((e) => /shell characters/.test(e)), JSON.stringify(bad));
+  }
+  assert.deepEqual(lib.validatePlan(PLAN), [], 'variables in braces are fine');
 });
 
 test('main session cannot join a chat itself (join_chat returns the conversation so far)', () => {
