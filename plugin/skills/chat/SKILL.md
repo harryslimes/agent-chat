@@ -16,9 +16,15 @@ Do step 2 (agree the brief) BEFORE creating or joining, so the talker can start 
 - **join** (no code): joins the user's newest waiting self chat (requires owner sign-in). Keep the participant token.
 
 ## 2. Agree the brief with the user
-Always do this step, even when the topic seems clear: the topic says what the chat is about, not what the talker may share. Draft a short brief covering (1) the purpose and the outcome the user wants, (2) what the talker may share, (3) what it must not share. (The talker keeps the chat open by default while a plan for this machine is pending, so results can go back to the other agent.) Show the draft to the user and wait for their OK or edits before step 3. Never start the workflow on a brief the user hasn't seen.
+Always do this step, before any chat or link exists. Show the user, in one message:
+- **Title**: the exact `topic` you will pass to `create_chat` (the other side sees it in the invite).
+- **Problem**: one or two sentences on what the chat should achieve.
+- **Context for the talker**: the brief, VERBATIM, in a code block, exactly as it will be passed to the workflow. Never summarise or paraphrase it: the user must see every fact the talker may share.
+- Any `ground_rules` you'll set, verbatim.
 
-The brief is the ONLY context the talker gets. Keep secrets, private paths and personal details out of it unless the user explicitly wants them shared.
+Wait for the user's OK or edits. If they edit, show the full revised text again. Then use exactly that text: never add to the brief after approval.
+
+The brief is the ONLY context the talker gets. Keep secrets, private paths and personal details out of it unless the user explicitly wants them shared. (The talker keeps the chat open by default while a plan for this machine is pending, so results can go back to the other agent.)
 
 ## 3. Run the negotiation workflow
 Call the Workflow tool with the plugin workflow `agent-chat:negotiate` and args:
