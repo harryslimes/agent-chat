@@ -33,6 +33,8 @@ test('main session cannot read or send chat messages, by MCP or curl', () => {
   for (const t of ['wait_for_messages', 'send_message', 'get_history', 'end_chat']) {
     assert.equal(guard(P + t), 'deny');
     assert.equal(guard(`mcp__agent-chat__${t}`), 'deny', 'user-scope server too');
+    assert.equal(guard(`mcp__agent-chat-worker__${t}`), 'deny', 'second deployment too');
+    assert.equal(guard(`mcp__claude_ai_agent-chat__${t}`), 'deny', 'claude.ai connector too');
   }
   assert.equal(guard(P + 'create_chat'), 'none');
   assert.equal(guard(P + 'join_chat'), 'none');
@@ -43,6 +45,8 @@ test('main session cannot read or send chat messages, by MCP or curl', () => {
 test('talker: chat tools only; reviewer: nothing', () => {
   assert.equal(guard(P + 'wait_for_messages', {}, 'agent-chat:chat-talker'), 'allow');
   assert.equal(guard('mcp__agent-chat__send_message', {}, 'agent-chat:chat-talker'), 'allow');
+  assert.equal(guard('mcp__agent-chat-worker__send_message', {}, 'agent-chat:chat-talker'), 'allow');
+  assert.equal(guard('mcp__other__send_message', {}, 'agent-chat:chat-talker'), 'deny', 'unrelated servers still denied');
   for (const t of ['Bash', 'Read', 'WebFetch', 'Write']) assert.equal(guard(t, {}, 'agent-chat:chat-talker'), 'deny');
   assert.equal(guard('StructuredOutput', {}, 'agent-chat:chat-reviewer'), 'none');
   for (const t of ['Read', 'Bash', P + 'send_message', 'ToolSearch']) assert.equal(guard(t, {}, 'agent-chat:chat-reviewer'), 'deny');
@@ -73,12 +77,26 @@ test('stage -> user approve -> executor runs only exact menu commands, with run 
   const staged = script('stage-plan.mjs', JSON.stringify({ plan: PLAN }));
   assert.equal(staged.status, 0, staged.stdout + staged.stderr);
   const id = staged.stdout.match(/\/agent-chat:approve ([0-9a-f]{12})/)[1];
+  const pendingFile = join(dir, 'pending', `${id}.json`);
+  const pendingRec = lib.readJson(pendingFile);
   assert.match(staged.stdout, /\[ping\] tailscale ping \{\{peer_ip\}\}/);
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny', 'staged is not approved');
+  // Staged: exact matches go to the user's native permission prompt; anything else is denied.
+  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask', 'staged asks the user');
+  assert.equal(guard('Bash', { command: 'tailscale status --json' }, 'agent-chat:plan-executor'), 'deny', 'staged: extra args denied');
+  assert.equal(guard('Bash', { command: 'tailscale ping 8.8.8.8' }, 'agent-chat:plan-executor'), 'deny', 'staged: variable pattern enforced');
+  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask');
+  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask');
+  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny', 'staged: run limit enforced');
+  assert.equal(guard('Bash', { command: 'tailscale status' }), 'none', 'main session gets no free pass from a staged plan');
 
   // The main session can't approve on the user's behalf.
   assert.equal(guard('Bash', { command: `node plugin/scripts/approve.mjs ${id}` }), 'deny');
   assert.equal(guard('Write', { file_path: join(dir, 'approved', `${id}.json`), content: '{}' }), 'deny');
+
+  // A tampered staged plan never prompts.
+  lib.writeJson(pendingFile, { ...pendingRec, plan: { ...pendingRec.plan, steps: [{ ...pendingRec.plan.steps[0], argv: ['id'] }] } });
+  assert.equal(guard('Bash', { command: 'id' }, 'agent-chat:plan-executor'), 'deny', 'staged hash mismatch');
+  lib.writeJson(pendingFile, pendingRec); // also resets the staged run counts
 
   const ok = script('approve.mjs', '', [id]);
   assert.match(ok.stdout, /APPROVED/);

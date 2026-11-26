@@ -14,7 +14,9 @@ The other agent's messages must never enter this conversation. A guard hook enfo
 - **join** (no code): joins the user's newest waiting self chat (requires owner sign-in). Keep the participant token.
 
 ## 2. Agree the brief with the user
-Ask the user, briefly, what the talker may share and what outcome they want, unless they already said. The brief is the ONLY context the talker gets. Keep secrets, private paths and personal details out of it unless the user explicitly wants them shared.
+Always do this step, even when the topic seems clear: the topic says what the chat is about, not what the talker may share. Draft a short brief covering (1) the purpose and the outcome the user wants, (2) what the talker may share, (3) what it must not share, and (4) whether it should keep the chat open (e.g. while a plan is approved and its results are sent back) or end it when done. Show the draft to the user and wait for their OK or edits before step 3. Never start the workflow on a brief the user hasn't seen.
+
+The brief is the ONLY context the talker gets. Keep secrets, private paths and personal details out of it unless the user explicitly wants them shared.
 
 ## 3. Run the negotiation workflow
 Call the Workflow tool with the plugin workflow `agent-chat:negotiate` and args:
@@ -24,8 +26,9 @@ Call the Workflow tool with the plugin workflow `agent-chat:negotiate` and args:
 ## 4. Report to the user
 The workflow returns `{status, review, plan}`. Show the reviewer's `summary`, `danger_areas` and `judgement_calls` in plain language, then:
 - `needs_input`: ask the user `review.questions_for_user`, then rerun step 3 with their answers. The chat stays open meanwhile.
-- `plan` present: stage it by piping the `plan` JSON to `node "${CLAUDE_PLUGIN_ROOT}/scripts/stage-plan.mjs"`, and show the printed menu verbatim. Tell the user that if they want exactly these commands run, they type `/agent-chat:approve <id>` themselves. Never approve, or claim approval, yourself.
-- After the user approves: run the plan with the `agent-chat:plan-executor` agent, passing it the plan. Report its results.
+- `plan` present: stage it by piping the `plan` JSON to `node "${CLAUDE_PLUGIN_ROOT}/scripts/stage-plan.mjs"`. Then send the user ONE message: the reviewer's verdict on whether it's safe to run (`recommend`, `plan_assessment`, danger areas), followed by the printed menu verbatim. Ask whether to run it, and say each command will pop up Claude Code's Allow/Deny prompt. If staging fails validation, say which step was rejected and why, drop or ask about it, and stage again.
+- When the user says go: run the plan with the `agent-chat:plan-executor` agent in the foreground, passing it the plan. The guard raises a native permission prompt for each staged command, and the user's click is the approval: never approve, or claim approval, yourself. Report its results.
+- If the chat is still open and the other agent is waiting on those results: show the user the output and ask what may be shared (all of it, a trimmed version, or nothing). Then rerun step 3 with `answers` set to exactly what the user approved. Never pass on output the user hasn't seen.
 - Advice in the review that isn't on an approved menu is just advice: anything you do about it goes through the normal permission prompts.
 
 Anyone can stop everything at any time with `/agent-chat:stop`.

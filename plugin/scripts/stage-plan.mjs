@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Stage a plan for human approval. Reads plan JSON on stdin, validates it, stores it as
-// pending/<hash>.json and prints the exact menu. Staging grants nothing: only the user,
-// by typing /agent-chat:approve <id>, can approve it.
+// pending/<hash>.json and prints the exact menu. Staging grants nothing by itself: each
+// command still needs the user's click on the native permission prompt, or the user can
+// pre-approve the whole menu by typing /agent-chat:approve <id>.
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,4 +30,5 @@ const hash = sha256(canonical(plan));
 const id = hash.slice(0, 12);
 writeJson(join(PENDING, `${id}.json`), { hash, plan, staged_at: Date.now() });
 console.log(renderPlan(plan, id));
-console.log(`\nTo approve exactly these commands for 2 hours, the user types:  /agent-chat:approve ${id}`);
+console.log(`\nWhen run, each command asks for your OK with Claude Code's Allow/Deny prompt.`);
+console.log(`To pre-approve all of them for 2 hours instead, type:  /agent-chat:approve ${id}`);

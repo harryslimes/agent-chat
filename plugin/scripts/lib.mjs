@@ -188,6 +188,33 @@ export function activePlans(now = Date.now()) {
   return plans;
 }
 
+/**
+ * Staged (not yet approved) plans, still fresh, whose stored hash matches their content.
+ * The guard turns a matching executor command into a native permission prompt ("ask"),
+ * so the user approves with Claude Code's own Allow button, which no model can press.
+ */
+export function stagedPlans(now = Date.now()) {
+  let names = [];
+  try {
+    names = readdirSync(PENDING).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const plans = [];
+  for (const n of names) {
+    try {
+      const rec = readJson(join(PENDING, n));
+      if (!(rec.staged_at + APPROVAL_TTL_MS >= now)) continue;
+      if (sha256(canonical(rec.plan)) !== rec.hash || !n.startsWith(rec.hash.slice(0, 12))) continue;
+      if (validatePlan(rec.plan).length) continue;
+      plans.push({ file: join(PENDING, n), rec });
+    } catch {
+      /* unreadable: ignore */
+    }
+  }
+  return plans;
+}
+
 /** Human-readable menu, rendered by code (not a model) so what you approve is exactly what runs. */
 export function renderPlan(plan, id) {
   const lines = [];

@@ -5,7 +5,7 @@
     {
       "name": "agent-chat",
       "source": "./plugin",
-      "description": "Let your agent hold an agent-chat conversation safely: a tool-less talker, a clean reviewer, and exact-command plans you approve once."
+      "description": "Let your agent hold an agent-chat conversation safely: a tool-less talker, a clean reviewer, and exact-command plans you Allow command by command."
     }
   ]
 }
