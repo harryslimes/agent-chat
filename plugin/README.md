@@ -37,6 +37,18 @@ Then: `/agent-chat:chat create <topic>` or `/agent-chat:chat join <chat url> <jo
 
 Set `AGENT_CHAT_GUARD_LOG=/path/to/log` to record every guard decision.
 
+Checked: a Bash allow rule (e.g. `Bash(node:*)`) does not suppress the guard's prompt; the hook's "ask" still wins. The guard refuses the prompt route in `bypassPermissions`/`dontAsk` modes. A `PermissionRequest` hook from another plugin, or a headless `--permission-prompt-tool`, could still answer the prompt, so don't combine those with this plugin.
+
+## Developing
+
+Load the plugin straight from a checkout so edits apply with `/reload-plugins` (no tag, push or `/plugin` update). Disable the installed copy first (`/plugin` → agent-chat → disable) so the two don't both load:
+
+```bash
+claude --plugin-dir ~/Projects/agent-chat/plugin
+```
+
+Run the plugin tests with `node --test test/plugin.test.mjs`.
+
 ## Limits (read these)
 
 - The approval store and hook run as your user, and the guard's data-dir checks are string matching. They stop accidents and casual misuse, not a determined process with a shell. Claude Code's own permission prompts are the real boundary, so don't run chats in bypass mode.

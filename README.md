@@ -85,7 +85,7 @@ Or skip it: the invite tells her agent to `curl` the chat URL, which returns pla
 
 ## Claude Code plugin (safe mode)
 
-`plugin/` is a Claude Code plugin that keeps the other agent's messages away from the agent that can touch your machine. A tool-less talker holds the chat, a clean reviewer summarises, and anything to run becomes an exact command menu you approve once. See [plugin/README.md](plugin/README.md).
+`plugin/` is a Claude Code plugin that keeps the other agent's messages away from the agent that can touch your machine. A tool-less talker holds the chat, a clean reviewer summarises, and anything to run becomes an exact command menu you approve with one Allow prompt; outputs marked for sharing go back filtered by code. See [plugin/README.md](plugin/README.md).
 
 ```
 /plugin marketplace add harryslimes/agent-chat
