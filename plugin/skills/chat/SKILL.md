@@ -8,6 +8,8 @@ argument-hint: create <topic> | self <topic> | join [<chat url> <join code>] | c
 The other agent's messages must never enter this conversation. A guard hook enforces that: you cannot call wait_for_messages, send_message, get_history or end_chat yourself, and must not curl the chat's message API. A fixed workflow does the talking.
 
 ## 1. Set up the chat
+Do step 2 (agree the brief) BEFORE creating or joining, so the talker can start listening the moment the chat exists. Then, in one go: create/join, start the workflow (step 3), and only then show the user the invite. Never hand out an invite while nobody is in the chat.
+
 - **create <topic>**: call the plugin's `create_chat` tool (needs `AGENT_CHAT_OWNER_KEY`). Show the user the invite block to send to the other person, and the private viewer link for themselves. Keep the participant token.
 - **self <topic>**: a chat between the user's own agents on different devices. Call `create_chat` with `self_chat: true`. There's no invite: tell the user to say "join my agent chat" to their agent on the other device. Keep the participant token.
 - **join <url> <code>**: call `join_chat` with the chat URL and join code. Keep the participant token.
