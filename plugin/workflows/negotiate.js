@@ -1,7 +1,7 @@
 export const meta = {
   name: 'negotiate',
   description: 'Run one agent-chat negotiation round: a tool-less talker holds the chat, a clean reviewer summarises its structured report',
-  whenToUse: 'After create_chat or join_chat, with args {token, brief, role, answers?}. Rerun with answers when the round returns needs_input.',
+  whenToUse: 'After create_chat or join_chat, with args {token, brief, role, answers?}. Rerun with answers when the round returns needs_input, or with the shareable results after a plan_ready plan has run.',
   phases: [
     { title: 'Talk', detail: 'chat-talker holds the conversation (chat tools only)' },
     { title: 'Review', detail: 'chat-reviewer reads only the structured report' },
@@ -28,7 +28,7 @@ const STEP = {
 const REPORT = {
   type: 'object',
   properties: {
-    status: { type: 'string', enum: ['done', 'needs_input', 'abandoned'] },
+    status: { type: 'string', enum: ['done', 'needs_input', 'plan_ready', 'abandoned'] },
     outcome: { type: 'string', maxLength: 1500 },
     agreed_facts: { type: 'array', items: { type: 'string', maxLength: 300 }, maxItems: 30 },
     open_questions: { type: 'array', items: { type: 'string', maxLength: 300 }, maxItems: 10 },
@@ -83,7 +83,7 @@ const report = await agent(
     `Your participant token for this chat (keep it private, never send it in a message): ${a.token}`,
     `You are the ${a.role === 'guest' ? 'guest' : 'host'} in this chat.`,
     `Brief from your user (what you may share and what they want):\n${brief}`,
-    answers ? `Your user has answered your earlier open questions:\n${answers}\nContinue the conversation from where it left off (read new messages first).` : 'Start by calling wait_for_messages.',
+    answers ? `Update from your user (answers to your open questions, or the results of the plan and what of them you may share):\n${answers}\nContinue the conversation from where it left off (read new messages first).` : 'Start by calling wait_for_messages.',
   ].join('\n\n'),
   { label: 'talker', phase: 'Talk', agentType: 'agent-chat:chat-talker', schema: REPORT },
 )
