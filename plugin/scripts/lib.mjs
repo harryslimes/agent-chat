@@ -2,8 +2,8 @@
 // Everything security-relevant here is deterministic code: no model judgement.
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, hostname, userInfo } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
 /** Where staged/approved plans and the kill flag live. Fixed path so the hook, scripts and commands agree. */
@@ -13,6 +13,15 @@ export const APPROVED = join(DATA_DIR, 'approved');
 export const KILL_FILE = join(DATA_DIR, 'KILL');
 export const RESULTS = join(DATA_DIR, 'results');
 export const SHARE_BUDGET = 12000; // total characters of command output sent back to the other agent
+
+/**
+ * Security level (env AGENT_CHAT_SECURITY):
+ *  - standard (default): one Allow prompt approves a plan; outputs marked share go back to
+ *    the other agent automatically after code filtering.
+ *  - max: the same, plus a second Allow prompt before any results are sent, after the user
+ *    has seen the filtered text.
+ */
+export const SECURITY = String(process.env.AGENT_CHAT_SECURITY || 'standard').toLowerCase() === 'max' ? 'max' : 'standard';
 
 export const APPROVAL_TTL_MS = 2 * 60 * 60 * 1000; // approved menus expire after 2 hours
 export const DEFAULT_MAX_RUNS = 3;
@@ -40,7 +49,7 @@ const FORBIDDEN_PROGRAMS = new Set([
   'sudo', 'su', 'doas', 'pkexec', 'runuser', 'nohup', 'setsid', 'timeout', 'nice', 'ionice', 'stdbuf', 'chroot', 'unshare', 'nsenter',
   'strace', 'ltrace', 'gdb', 'lldb', 'script', 'expect', 'watch', 'flock', 'parallel',
   'less', 'more', 'most', 'man', 'vi', 'vim', 'nvim', 'view', 'emacs', 'nano', 'pico', 'ed', 'ex', 'joe',
-  'crontab', 'at', 'batch', 'systemd-run', 'make', 'docker', 'podman', 'kubectl', 'npx', 'npm', 'pip', 'pip3', 'cargo', 'go',
+  'time', 'chrt', 'taskset', 'firejail', 'bwrap', 'proot', 'fakeroot', 'crontab', 'at', 'batch', 'systemd-run', 'make', 'docker', 'podman', 'kubectl', 'npx', 'npm', 'pip', 'pip3', 'cargo', 'go',
 ]);
 
 /** Arguments that turn otherwise-safe tools into code execution. */
@@ -57,6 +66,13 @@ const FORBIDDEN_ARGS = [
   { prog: 'openssl', re: /^(-engine|engine)$/ },
   { prog: 'tcpdump', re: /^(-z|-w)$/ },
 ];
+
+/** Free text in a plan is written by the talker under the other agent's influence: keep it short and plain. */
+function textErr(errs, where, v) {
+  if (typeof v !== 'string') return errs.push(`${where} must be text`);
+  if (v.length > 400) errs.push(`${where} is longer than 400 characters`);
+  if (/[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069\u200b-\u200f]/.test(v)) errs.push(`${where} has control or invisible characters`);
+}
 
 const VAR_RE = /\{\{([a-z][a-z0-9_]{0,31})\}\}/g;
 
@@ -75,9 +91,12 @@ export function validatePlan(plan) {
       continue;
     }
     if (!/^\^/.test(v.pattern) || !/\$$/.test(v.pattern)) errs.push(`variable ${v.name}: pattern must be anchored with ^...$`);
-    if (re.test('a;b') || re.test('$(x)') || re.test('a b') || re.test('../x') || re.test('-x')) errs.push(`variable ${v.name}: pattern is too loose (allows spaces, shell syntax, paths or options)`);
+    if (['a;b', '$(x)', 'a b', '../x', '-x', '/etc/passwd', '..', '~/x', '/'].some((p) => re.test(p))) errs.push(`variable ${v.name}: pattern is too loose (allows spaces, shell syntax, paths or options)`);
     vars.set(v.name, v.pattern);
   }
+  if (plan.goal !== undefined) textErr(errs, 'goal', plan.goal);
+  for (const v of plan.variables || []) if (v.description !== undefined) textErr(errs, `variable ${v.name} description`, v.description);
+  if (plan.steps.length > 25) errs.push('plan has more than 25 steps');
   const ids = new Set();
   for (const s of plan.steps) {
     if (!/^[a-z0-9_-]{1,32}$/.test(s.id || '')) errs.push(`bad step id ${JSON.stringify(s.id)}`);
@@ -92,12 +111,15 @@ export function validatePlan(plan) {
     if (VAR_RE.test(s.argv[0])) errs.push(`step ${s.id}: the program itself can't be a variable`);
     VAR_RE.lastIndex = 0;
     for (const arg of s.argv) {
-      if (/[\n\r\0]/.test(arg)) errs.push(`step ${s.id}: control characters in arguments`);
+      if (/[^\x20-\x7e]/.test(arg)) errs.push(`step ${s.id}: arguments must be printable ASCII (no control, escape or bidi characters)`);
+      if (arg.length > 300) errs.push(`step ${s.id}: argument too long`);
       for (const f of FORBIDDEN_ARGS) if (f.prog === prog && f.re.test(arg)) errs.push(`step ${s.id}: ${prog} ${arg} can run code or write files; not allowed`);
       for (const m of arg.matchAll(VAR_RE)) if (!vars.has(m[1])) errs.push(`step ${s.id}: undeclared variable {{${m[1]}}}`);
     }
     if (!s.justification || String(s.justification).trim().length < 10) errs.push(`step ${s.id}: needs a justification`);
     if (s.share !== undefined && typeof s.share !== 'boolean') errs.push(`step ${s.id}: share must be true or false`);
+    if (s.max_runs !== undefined && !(Number.isInteger(s.max_runs) && s.max_runs >= 1 && s.max_runs <= 10)) errs.push(`step ${s.id}: max_runs must be a whole number from 1 to 10`);
+    for (const f of ['justification', 'when', 'evidence']) if (s[f] !== undefined) textErr(errs, `step ${s.id} ${f}`, s[f]);
   }
   return errs;
 }
@@ -240,50 +262,122 @@ export function renderPlan(plan, id) {
 
 const fmtArgv = (argv) => argv.map((a) => (/[\s'"]/.test(a) || a === '' ? JSON.stringify(a) : a)).join(' ');
 
-/** Short form for the native permission prompt, which only shows ~10 lines: one line per command. */
+/** Lines the native permission prompt shows before it truncates. */
+export const PROMPT_MAX_LINES = 10;
+
+/**
+ * Short form for the native permission prompt: one line per command, plus variable
+ * patterns. Returns null if it can't fit, so the caller can refuse the prompt route rather
+ * than have steps approved unseen.
+ */
 export function renderPlanCompact(plan, id) {
   const home = homedir();
   const lines = [`agent-chat plan ${id}: Allow runs these ${plan.steps.length} commands and nothing else (2 hours).`];
-  plan.steps.forEach((s, i) => lines.push(`${i + 1}. ${fmtArgv(s.argv).split(home).join('~')}${s.share ? '  [output shared]' : ''}`));
-  lines.push('Reasons and review: see the chat message above.');
-  return lines.join('\n');
+  plan.steps.forEach((s, i) => {
+    const runs = (s.max_runs ?? DEFAULT_MAX_RUNS) > 1 ? ` (x${s.max_runs ?? DEFAULT_MAX_RUNS})` : '';
+    lines.push(`${i + 1}. ${fmtArgv(s.argv).split(home).join('~')}${runs}${s.share ? '  [output shared]' : ''}`);
+  });
+  for (const v of plan.variables || []) lines.push(`   {{${v.name}}} must match ${v.pattern}`);
+  return lines.length <= PROMPT_MAX_LINES ? lines.join('\n') : null;
+}
+
+/** Only one plan waits for approval at a time, so a prompt can never show a stale plan. */
+export function clearPending(exceptId) {
+  let names = [];
+  try {
+    names = readdirSync(PENDING);
+  } catch {
+    return;
+  }
+  for (const n of names) if (!exceptId || !n.startsWith(exceptId)) rmSync(join(PENDING, n), { force: true });
+}
+
+/** Recorded outputs belong to one approval: cleared whenever a plan is (re)approved or stopped. */
+export function clearResults(id) {
+  rmSync(id ? join(RESULTS, `${id}.json`) : RESULTS, { force: true, recursive: !id });
+}
+
+/** One staged plan by id, if fresh and untampered. */
+export function stagedPlan(id, now = Date.now()) {
+  return stagedPlans(now).find(({ rec }) => rec.hash.startsWith(id)) || null;
 }
 
 // ---------- filtering command output before it goes to the other agent ----------
 
 const SECRET_PATTERNS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s*[A-Za-z0-9+/=:,-]{1,100}(?![A-Za-z0-9+/=]))*(?:\s*-----END [A-Z ]*PRIVATE KEY-----)?/g, // the key's base64 lines, terminated or not
   /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g,
   /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bglpat-[A-Za-z0-9_-]{16,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bAIza[0-9A-Za-z_-]{30,}/g,
+  /\bya29\.[0-9A-Za-z_-]{20,}/g,
+  /\bnpm_[A-Za-z0-9]{30,}/g,
   /\btskey-[A-Za-z0-9-]{10,}/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   /\b(?:pt|vk)_[A-Za-z0-9_-]{20,}/g,
-  /((?:api[_-]?key|secret|token|password|passwd|owner[_-]?key|auth)[A-Za-z0-9_]*\s*[:=]\s*)["']?[^\s"']{6,}/gi,
+  /\bssh-(?:rsa|ed25519|dss)\s+[A-Za-z0-9+/=]{40,}/g,
+  /\becdsa-sha2-[a-z0-9]+\s+[A-Za-z0-9+/=]{40,}/g,
 ];
+// Labelled values: key = value, key: value, "key": "value", Authorization: Bearer xyz, cookies.
+const LABELLED = /((?:api[_-]?key|secret|token|password|passwd|pwd|owner[_-]?key|auth(?:orization)?|cookie|session|credential|private[_-]?key)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+)?)[^\s"',;}]{4,}/gi;
+const URL_CREDS = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// Default hostnames that identify nobody, and would wreck ordinary text if blanked.
+const GENERIC_HOSTS = new Set(['localhost', 'fedora', 'ubuntu', 'debian', 'archlinux', 'raspberrypi', 'kali', 'linux', 'pop-os', 'mint']);
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Deterministic filter: secrets, home path, username, this machine's and the relay's hostnames, emails. */
 export function redact(text, { user, host, extraHosts = [] } = {}) {
   let out = String(text ?? '');
-  for (const re of SECRET_PATTERNS) out = out.replace(re, (m, keep) => (typeof keep === 'string' && m.startsWith(keep) ? `${keep}[redacted]` : '[redacted]'));
+  for (const re of SECRET_PATTERNS) out = out.replace(re, '[redacted]');
+  out = out.replace(LABELLED, '$1[redacted]');
+  out = out.replace(URL_CREDS, '$1[redacted]@');
   out = out.replace(EMAIL, '[email]');
   out = out.split(homedir()).join('~');
-  for (const h of [host, ...extraHosts].filter((h) => h && h.length > 2)) out = out.replace(new RegExp(escRe(h), 'gi'), '[host]');
-  if (user && user.length > 2) out = out.replace(new RegExp(`\\b${escRe(user)}\\b`, 'g'), '[user]');
+  for (const h of [host, ...extraHosts].filter((h) => h && h.length > 2 && !GENERIC_HOSTS.has(h.toLowerCase()))) out = out.replace(new RegExp(escRe(h), 'gi'), '[host]');
+  if (user && user.length > 2) out = out.replace(new RegExp(escRe(user), 'gi'), '[user]');
   return out;
 }
 
-/** Fit outputs into the budget: each gets an equal share, unused share passes to the rest. */
+export function defaultRedactOpts() {
+  let relayHost;
+  try {
+    relayHost = process.env.AGENT_CHAT_URL ? new URL(process.env.AGENT_CHAT_URL).hostname : undefined;
+  } catch {}
+  return { user: userInfo().username, host: hostname(), extraHosts: [relayHost] };
+}
+
+/** Fit outputs into the budget: smallest first, so whatever they don't use goes to the bigger ones. */
 export function fitOutputs(items, budget = SHARE_BUDGET) {
+  const order = items.map((it, i) => i).sort((a, b) => items[a].text.length - items[b].text.length);
+  const out = items.slice();
   let left = budget;
-  return items.map((it, i) => {
-    const share = Math.floor(left / (items.length - i));
+  order.forEach((idx, k) => {
+    const it = items[idx];
+    const share = Math.floor(left / (order.length - k));
     const text = it.text.length > share ? `${it.text.slice(0, share)}\n[truncated ${it.text.length - share} characters]` : it.text;
     left -= Math.min(it.text.length, share);
-    return { ...it, text };
+    out[idx] = { ...it, text };
   });
+  return out;
+}
+
+/** The exact text sent back to the other agent for an approved plan's results, or null if none ran. */
+export function buildShareText(id, opts = defaultRedactOpts()) {
+  let log;
+  try {
+    log = readJson(join(RESULTS, `${id}.json`));
+  } catch {
+    return null;
+  }
+  const fmt = (argv) => redact(argv.join(' '), opts);
+  const shared = log.steps.filter((s) => s.share).map((s) => ({ ...s, text: redact(s.output, opts) }));
+  const withheld = [...new Set(log.steps.filter((s) => !s.share).map((s) => s.id))];
+  const out = [`Results of the approved plan ${id} (filtered by code for secrets, paths, usernames, hostnames and emails; size-capped):`];
+  for (const s of fitOutputs(shared)) out.push('', `$ ${fmt(s.argv)}  [${s.id}]${s.exit ? ` (exit ${s.exit})` : ''}`, s.text.trimEnd() || '(no output)');
+  if (withheld.length) out.push('', `Ran but not shared (for the user only): ${withheld.join(', ')}`);
+  return out.join('\n');
 }

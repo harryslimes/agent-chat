@@ -1,9 +1,9 @@
 // Plugin guard + plan rules: feed the real hook script realistic PreToolUse inputs.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 
 const dir = mkdtempSync(join(tmpdir(), 'agent-chat-plugin-'));
@@ -19,6 +19,24 @@ function guard(tool_name, tool_input = {}, agent_type) {
   return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecision : 'none';
 }
 const P = 'mcp__plugin_agent-chat_agent-chat__';
+function guardFull({ tool_name, tool_input = {}, agent_type, permission_mode = 'default' }, extraEnv = {}) {
+  const r = spawnSync(process.execPath, ['plugin/scripts/guard.mjs'], { input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name, tool_input, permission_mode, ...(agent_type ? { agent_type, agent_id: 'a1' } : {}) }), env: { ...env, ...extraEnv }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  if (!r.stdout) return { decision: 'none', reason: '' };
+  const o = JSON.parse(r.stdout).hookSpecificOutput;
+  return { decision: o.permissionDecision, reason: o.permissionDecisionReason };
+}
+const EX = 'agent-chat:plan-executor';
+const APPROVE_PLAN = resolve('plugin/scripts/approve-plan.mjs');
+const approveCmd = (id) => `node "${APPROVE_PLAN}" ${id}`;
+const stage = (plan) => {
+  const f = join(dir, `plan-${Math.random().toString(36).slice(2)}.json`);
+  writeFileSync(f, JSON.stringify(plan));
+  const r = script('stage-plan.mjs', '', [f]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  return r.stdout.match(/Plan ([0-9a-f]{12})/)[1];
+};
+const reset = () => { for (const d of ['approved', 'pending', 'results', 'KILL']) rmSync(join(dir, d), { recursive: true, force: true }); };
 const await_home = () => process.env.HOME;
 const post = (tool_name, tool_input = {}, agent_type, tool_response = {}) => {
   const r = script('post.mjs', JSON.stringify({ hook_event_name: 'PostToolUse', tool_name, tool_input, tool_response, ...(agent_type ? { agent_type, agent_id: 'a1' } : {}) }));
@@ -42,7 +60,6 @@ test('main session cannot read or send chat messages, by MCP or curl', () => {
     assert.equal(guard(`mcp__claude_ai_agent-chat__${t}`), 'deny', 'claude.ai connector too');
   }
   assert.equal(guard(P + 'create_chat'), 'none');
-  assert.equal(guard(P + 'join_chat'), 'none');
   assert.equal(guard('Bash', { command: 'curl -s https://x/api/chats/abcdefghijklmnopqrstuvwxyz/messages -H "Authorization: Bearer pt_x"' }), 'deny');
   assert.equal(guard('Bash', { command: 'ls -la' }), 'none', 'unrelated calls are left alone');
 });
@@ -74,110 +91,134 @@ test('command splitting refuses shell syntax', () => {
   }
 });
 
-test('stage -> user approve -> executor runs only exact menu commands, with run limits and kill switch', () => {
-  // Executor with nothing approved: denied.
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny');
+test('staged plan is approved only by approve-plan behind the native prompt', () => {
+  reset();
+  assert.equal(guard('Bash', { command: 'tailscale status' }, EX), 'deny', 'nothing approved');
+  const id = stage(PLAN);
+  assert.equal(guard('Bash', { command: 'tailscale status' }, EX), 'deny', 'staged is not approved, and plain commands never prompt');
 
-  // Stage (grants nothing), then approve as the user would.
-  const staged = script('stage-plan.mjs', JSON.stringify({ plan: PLAN }));
-  assert.equal(staged.status, 0, staged.stdout + staged.stderr);
-  const id = staged.stdout.match(/\/agent-chat:approve ([0-9a-f]{12})/)[1];
-  const pendingFile = join(dir, 'pending', `${id}.json`);
-  const pendingRec = lib.readJson(pendingFile);
-  assert.match(staged.stdout, /\[ping\] tailscale ping \{\{peer_ip\}\}/);
-  // Staged: an exact match raises one native prompt showing the whole plan; anything else is denied.
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask', 'staged asks the user');
-  assert.equal(guard('Bash', { command: 'tailscale status --json' }, 'agent-chat:plan-executor'), 'deny', 'staged: extra args denied');
-  assert.equal(guard('Bash', { command: 'tailscale ping 8.8.8.8' }, 'agent-chat:plan-executor'), 'deny', 'staged: variable pattern enforced');
-  assert.equal(guard('Bash', { command: 'tailscale status' }), 'none', 'main session gets no free pass from a staged plan');
-  // PostToolUse from another agent, or for a command the guard did not ask about, promotes nothing.
-  post('Bash', { command: 'tailscale status' });
-  post('Bash', { command: 'tailscale ping 100.64.0.1' }, 'agent-chat:plan-executor');
-  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.1' }, 'agent-chat:plan-executor'), 'ask', 'still only staged');
+  const asked = guardFull({ tool_name: 'Bash', tool_input: { command: approveCmd(id) }, agent_type: EX });
+  assert.equal(asked.decision, 'ask', 'approve-plan raises the prompt');
+  assert.match(asked.reason, /Allow runs these 2 commands/);
+  assert.match(asked.reason, /^2\. tailscale ping \{\{peer_ip\}\} \(x2\)/m, 'max_runs shown');
+  assert.match(asked.reason, /\{\{peer_ip\}\} must match/, 'variable pattern shown');
 
-  // The main session can't approve on the user's behalf.
+  // Nobody else can run it, and modes that could auto-answer the prompt are refused.
+  assert.equal(guard('Bash', { command: approveCmd(id) }), 'deny', 'main session');
+  assert.equal(guardFull({ tool_name: 'Bash', tool_input: { command: approveCmd(id) }, agent_type: EX, permission_mode: 'bypassPermissions' }).decision, 'deny');
+  assert.equal(guardFull({ tool_name: 'Bash', tool_input: { command: `node /tmp/approve-plan.mjs ${id}` }, agent_type: EX }).decision, 'deny', 'a look-alike script elsewhere');
   assert.equal(guard('Bash', { command: `node plugin/scripts/approve.mjs ${id}` }), 'deny');
   assert.equal(guard('Write', { file_path: join(dir, 'approved', `${id}.json`), content: '{}' }), 'deny');
+  assert.equal(guard('Bash', { command: `cat ${join(dir, 'results', 'x.json')}` }), 'deny', 'results dir is off-limits');
 
-  // A tampered staged plan never prompts.
-  lib.writeJson(pendingFile, { ...pendingRec, plan: { ...pendingRec.plan, steps: [{ ...pendingRec.plan.steps[0], argv: ['id'] }] } });
-  assert.equal(guard('Bash', { command: 'id' }, 'agent-chat:plan-executor'), 'deny', 'staged hash mismatch');
-  lib.writeJson(pendingFile, pendingRec); // also resets the staged run counts
-
-  const ok = script('approve.mjs', '', [id]);
+  // The user clicked Allow, so the script runs: that IS the approval.
+  const ok = script('approve-plan.mjs', '', [id]);
   assert.match(ok.stdout, /APPROVED/);
+  assert.equal(readdirSync(join(dir, 'pending')).length, 0, 'no staged plans left');
 
-  // Exact matches allowed (and auto-approved); variations denied.
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'allow');
-  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.7' }, 'agent-chat:plan-executor'), 'allow');
-  assert.equal(guard('Bash', { command: 'tailscale ping 8.8.8.8' }, 'agent-chat:plan-executor'), 'deny', 'variable pattern enforced');
-  assert.equal(guard('Bash', { command: 'tailscale status --json' }, 'agent-chat:plan-executor'), 'deny', 'extra args denied');
-  assert.equal(guard('Bash', { command: 'tailscale status; id' }, 'agent-chat:plan-executor'), 'deny');
-  assert.equal(guard('Read', { file_path: '/etc/passwd' }, 'agent-chat:plan-executor'), 'deny');
-
-  // max_runs: ping allowed twice in total.
-  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.8' }, 'agent-chat:plan-executor'), 'allow');
-  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.9' }, 'agent-chat:plan-executor'), 'deny');
+  assert.equal(guard('Bash', { command: 'tailscale status' }, EX), 'allow');
+  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.7' }, EX), 'allow');
+  assert.equal(guard('Bash', { command: 'tailscale ping 8.8.8.8' }, EX), 'deny', 'variable pattern enforced');
+  assert.equal(guard('Bash', { command: 'tailscale status --json' }, EX), 'deny', 'extra args denied');
+  assert.equal(guard('Bash', { command: 'tailscale status; id' }, EX), 'deny');
+  assert.equal(guard('Read', { file_path: '/etc/passwd' }, EX), 'deny');
+  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.8' }, EX), 'allow');
+  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.9' }, EX), 'deny', 'max_runs');
 
   // Tampering with an approved plan invalidates it.
   const file = join(dir, 'approved', `${id}.json`);
   const rec = lib.readJson(file);
   lib.writeJson(file, { ...rec, plan: { ...rec.plan, steps: [{ ...rec.plan.steps[0], argv: ['id'] }] } });
-  assert.equal(guard('Bash', { command: 'id' }, 'agent-chat:plan-executor'), 'deny', 'hash mismatch');
+  assert.equal(guard('Bash', { command: 'id' }, EX), 'deny', 'hash mismatch');
   lib.writeJson(file, rec);
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'allow');
 
-  // Kill switch: main may pull it, only the user may clear it.
+  // Kill switch: main may pull it, only the user may clear it. Stop drops everything.
   assert.equal(guard('Bash', { command: 'node plugin/scripts/stop.mjs --clear' }), 'deny');
   script('stop.mjs');
-  assert.ok(existsSync(join(dir, 'KILL')));
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny');
+  assert.equal(guard('Bash', { command: 'tailscale status' }, EX), 'deny');
   script('stop.mjs', '', ['--clear']);
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny', 'approvals stay revoked after clearing');
+  assert.equal(guard('Bash', { command: 'tailscale status' }, EX), 'deny', 'approvals stay revoked after clearing');
 });
 
-test('one Allow on the native prompt approves the whole staged plan', () => {
-  rmSync(join(dir, 'KILL'), { force: true });
-  const plan = { goal: 'two reads', steps: [
-    { id: 'a', argv: ['ls', '-la', 'src'], justification: 'List the source folder.', max_runs: 1 },
-    { id: 'b', argv: ['git', 'ls-files'], justification: 'List tracked files.', max_runs: 1 },
+test('a denied or replaced plan can never be approved by a later run', () => {
+  reset();
+  const bad = { goal: 'B', steps: [
+    { id: 'shared', argv: ['tailscale', 'status'], justification: 'Check the node is up.' },
+    { id: 'evil', argv: ['cat', 'secret.txt'], justification: 'Not something the user wants.' },
   ] };
-  const staged = script('stage-plan.mjs', JSON.stringify(plan));
-  assert.equal(staged.status, 0, staged.stdout);
-  const r = script('guard.mjs', JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls -la src' }, agent_type: 'agent-chat:plan-executor', agent_id: 'a1' }));
-  const out = JSON.parse(r.stdout).hookSpecificOutput;
-  assert.equal(out.permissionDecision, 'ask');
-  assert.match(out.permissionDecisionReason, /Allow runs these 2 commands/);
-  assert.match(out.permissionDecisionReason, /^2\. git ls-files/m, 'prompt shows every command, one line each');
-  assert.ok(out.permissionDecisionReason.split('\n').length <= 10, 'fits the prompt without truncation');
-  // The user clicked Allow, so the command ran and PostToolUse fires.
-  post('Bash', { command: 'ls -la src' }, 'agent-chat:plan-executor');
-  assert.equal(guard('Bash', { command: 'git ls-files' }, 'agent-chat:plan-executor'), 'allow', 'rest of the plan runs without a prompt');
-  assert.equal(guard('Bash', { command: 'ls -la src' }, 'agent-chat:plan-executor'), 'deny', 'the allowed run counted toward max_runs');
-  assert.equal(guard('Bash', { command: 'git status' }, 'agent-chat:plan-executor'), 'deny', 'off-menu still denied');
+  const idB = stage(bad);
+  assert.equal(guardFull({ tool_name: 'Bash', tool_input: { command: approveCmd(idB) }, agent_type: EX }).decision, 'ask');
+  // User clicks Deny: approve-plan never runs. The talker revises; staging replaces B.
+  const idA = stage({ goal: 'A', steps: [{ id: 'shared', argv: ['tailscale', 'status'], justification: 'Check the node is up.' }] });
+  assert.equal(guardFull({ tool_name: 'Bash', tool_input: { command: approveCmd(idB) }, agent_type: EX }).decision, 'deny', 'B is gone');
+  script('approve-plan.mjs', '', [idA]);
+  for (let i = 0; i < 3; i++) post('Bash', { command: 'tailscale status' }, EX, { stdout: 'ok' });
+  assert.equal(guard('Bash', { command: 'cat secret.txt' }, EX), 'deny', 'B never got approved');
 });
 
-test('outputs of shared steps go back filtered and size-capped; unshared steps are withheld', () => {
-  const home = (await_home());
+test('plans too long for one prompt must be approved by typing /agent-chat:approve', () => {
+  reset();
+  const steps = Array.from({ length: 12 }, (_, i) => ({ id: `s${i}`, argv: ['ls', `dir${i}`], justification: 'List a folder for the check.' }));
+  const id = stage({ goal: 'long', steps });
+  const r = guardFull({ tool_name: 'Bash', tool_input: { command: approveCmd(id) }, agent_type: EX });
+  assert.equal(r.decision, 'deny');
+  assert.match(r.reason, /too long.*\/agent-chat:approve/);
+});
+
+test('validation: max_runs, printable ASCII, wrapper programs, loose path variables, free text', () => {
+  const v = (step, variables = []) => lib.validatePlan({ steps: [{ id: 'x', justification: 'because reasons here', ...step }], variables });
+  assert.ok(v({ argv: ['ls'], max_runs: 1e9 }).some((e) => /max_runs/.test(e)));
+  assert.ok(v({ argv: ['ls', 'a‮b'] }).some((e) => /printable ASCII/.test(e)));
+  assert.ok(v({ argv: ['ls', '\u001b[2J'] }).some((e) => /printable ASCII/.test(e)));
+  assert.ok(v({ argv: ['time', 'bash', '-c', 'id'] }).some((e) => /arbitrary code/.test(e)));
+  assert.ok(v({ argv: ['cat', '{{f}}'] }, [{ name: 'f', pattern: '^[^ ;$.-][^ ;$]*$' }]).some((e) => /too loose/.test(e)));
+  assert.ok(v({ argv: ['ls'], justification: 'x'.repeat(500) }).some((e) => /longer than 400/.test(e)));
+});
+
+test('shared outputs go back filtered, size-capped and exactly; old results are not re-sent', () => {
+  reset();
   const plan = { goal: 'share test', steps: [
-    { id: 'pub', argv: ['cat', 'notes.txt'], justification: 'The other agent needs the notes.', share: true, max_runs: 1 },
+    { id: 'pub', argv: ['cat', 'notes.txt'], justification: 'The other agent needs the notes.', share: true, max_runs: 2 },
     { id: 'priv', argv: ['ls', 'secret-dir'], justification: 'Only for the user.', share: false, max_runs: 1 },
   ] };
-  const staged = script('stage-plan.mjs', JSON.stringify(plan));
-  assert.match(staged.stdout, /output to the other agent: yes \(filtered\)/);
-  const id = staged.stdout.match(/Plan ([0-9a-f]{12})/)[1];
-  assert.equal(guard('Bash', { command: 'cat notes.txt' }, 'agent-chat:plan-executor'), 'ask');
-  const leak = `path ${home}/x key ghp_abcdefghijklmnopqrstuvwx1234 mail a.b@example.com OWNER_KEY=deadbeefcafe1234 ` + 'z'.repeat(20000);
-  post('Bash', { command: 'cat notes.txt' }, 'agent-chat:plan-executor', { stdout: leak, stderr: '' });
-  assert.equal(guard('Bash', { command: 'ls secret-dir' }, 'agent-chat:plan-executor'), 'allow');
-  post('Bash', { command: 'ls secret-dir' }, 'agent-chat:plan-executor', { stdout: 'private stuff', stderr: '' });
+  let id = stage(plan);
+  assert.match(script('stage-plan.mjs', '', [join(dir, 'nope')]).stderr, /Could not read/);
+  script('approve-plan.mjs', '', [id]);
+  const home = process.env.HOME;
+  const leak = [
+    `path ${home}/x`, 'key ghp_abcdefghijklmnopqrstuvwx1234', 'mail a.b@example.com', 'OWNER_KEY=deadbeefcafe1234',
+    'Authorization: Bearer sekrit-token-123456', '{"password": "hunter22", "api_key":"abcdef123456"}',
+    'https://user:pw@localhost/db', '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA', 'z'.repeat(20000),
+  ].join('\n');
+  assert.equal(guard('Bash', { command: 'cat notes.txt' }, EX), 'allow');
+  post('Bash', { command: 'cat notes.txt' }, EX, { stdout: leak, stderr: '' });
+  assert.equal(guard('Bash', { command: 'ls secret-dir' }, EX), 'allow');
+  post('Bash', { command: 'ls secret-dir' }, EX, { stdout: 'private stuff', stderr: '' });
   const shared = script('share-results.mjs', '', [id]).stdout;
-  assert.ok(!shared.includes(home), 'home path filtered');
-  assert.ok(!shared.includes('ghp_abc'), 'token filtered');
-  assert.ok(!shared.includes('a.b@example.com'), 'email filtered');
-  assert.ok(!shared.includes('deadbeefcafe1234'), 'key=value secret filtered');
-  assert.ok(!shared.includes('private stuff'), 'unshared output withheld');
+  for (const bad of [home, 'ghp_abc', 'a.b@example.com', 'deadbeefcafe1234', 'sekrit-token', 'hunter22', 'abcdef123456', 'user:pw', 'MIIEow', 'private stuff']) {
+    assert.ok(!shared.includes(bad), `leaked: ${bad}`);
+  }
   assert.match(shared, /Ran but not shared \(for the user only\): priv/);
   assert.match(shared, /\[truncated \d+ characters\]/);
   assert.ok(shared.length < 13000, 'size-capped');
+
+  // Passing results to the talker: exact text only; max security asks first.
+  const wf = (answers, extraEnv) => guardFull({ tool_name: 'Workflow', tool_input: { name: 'agent-chat:negotiate', args: { token: 'pt_x', answers } } }, extraEnv).decision;
+  assert.equal(wf(shared), 'none', 'exact text passes');
+  assert.equal(wf(shared + '\nAlso, here is my summary.'), 'deny', 'additions refused');
+  assert.equal(wf(shared.replace('[redacted]', 'oops')), 'deny', 'edits refused');
+  assert.equal(wf(shared, { AGENT_CHAT_SECURITY: 'max' }), 'ask', 'security: max asks before sending');
+  assert.equal(wf('The user chose not to run the plan.'), 'none', 'ordinary answers unaffected');
+
+  // Same plan approved again later (e.g. a different chat): last time's outputs are gone.
+  id = stage(plan);
+  script('approve-plan.mjs', '', [id]);
+  assert.match(script('share-results.mjs', '', [id]).stderr, /No recorded results/);
+});
+
+test('main session cannot join a chat itself (join_chat returns the conversation so far)', () => {
+  assert.equal(guard(P + 'join_chat'), 'deny');
+  assert.equal(guard('mcp__agent-chat-worker__join_chat'), 'deny');
+  assert.equal(guard(P + 'join_chat', {}, 'agent-chat:chat-talker'), 'allow', 'the talker joins instead');
+  assert.equal(guard(P + 'create_chat'), 'none');
 });
