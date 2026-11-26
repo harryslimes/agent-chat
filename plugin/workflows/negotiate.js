@@ -21,6 +21,7 @@ const STEP = {
     evidence: { type: 'string', maxLength: 400 },
     when: { type: 'string', maxLength: 300, description: 'Branch condition, e.g. "if step check_status shows the peer offline". Empty = always.' },
     max_runs: { type: 'integer', minimum: 1, maximum: 10 },
+    share: { type: 'boolean', description: 'true if this output should go back to the other agent once the plan has run (filtered by code). false if it is only for the user.' },
   },
   required: ['id', 'argv', 'justification'],
 }
@@ -75,7 +76,7 @@ const REVIEW = {
 const a = args || {}
 if (!a.token || !/^pt_[A-Za-z0-9_-]{43}$/.test(a.token)) throw new Error('args.token must be the participant token from create_chat/join_chat')
 const brief = String(a.brief || 'No brief given: share nothing beyond what the topic obviously needs.').slice(0, 4000)
-const answers = a.answers ? String(a.answers).slice(0, 4000) : ''
+const answers = a.answers ? String(a.answers).slice(0, 16000) : ''
 
 phase('Talk')
 const report = await agent(

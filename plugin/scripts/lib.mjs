@@ -11,12 +11,14 @@ export const DATA_DIR = resolve(process.env.AGENT_CHAT_DATA_DIR || join(homedir(
 export const PENDING = join(DATA_DIR, 'pending');
 export const APPROVED = join(DATA_DIR, 'approved');
 export const KILL_FILE = join(DATA_DIR, 'KILL');
+export const RESULTS = join(DATA_DIR, 'results');
+export const SHARE_BUDGET = 12000; // total characters of command output sent back to the other agent
 
 export const APPROVAL_TTL_MS = 2 * 60 * 60 * 1000; // approved menus expire after 2 hours
 export const DEFAULT_MAX_RUNS = 3;
 
 export function ensureDirs() {
-  for (const d of [DATA_DIR, PENDING, APPROVED]) mkdirSync(d, { recursive: true, mode: 0o700 });
+  for (const d of [DATA_DIR, PENDING, APPROVED, RESULTS]) mkdirSync(d, { recursive: true, mode: 0o700 });
 }
 
 /** Stable JSON (sorted keys) so the same plan always hashes the same. */
@@ -95,6 +97,7 @@ export function validatePlan(plan) {
       for (const m of arg.matchAll(VAR_RE)) if (!vars.has(m[1])) errs.push(`step ${s.id}: undeclared variable {{${m[1]}}}`);
     }
     if (!s.justification || String(s.justification).trim().length < 10) errs.push(`step ${s.id}: needs a justification`);
+    if (s.share !== undefined && typeof s.share !== 'boolean') errs.push(`step ${s.id}: share must be true or false`);
   }
   return errs;
 }
@@ -228,8 +231,59 @@ export function renderPlan(plan, id) {
     lines.push(`  [${s.id}] ${s.argv.map((a) => (/[\s'"]/.test(a) || a === '' ? JSON.stringify(a) : a)).join(' ')}`);
     if (s.when) lines.push(`        when: ${s.when}`);
     lines.push(`        why:  ${s.justification}`);
+    lines.push(`        output to the other agent: ${s.share ? 'yes (filtered)' : 'no'}`);
     if (s.evidence) lines.push(`        evidence: ${s.evidence}`);
     lines.push(`        max runs: ${s.max_runs ?? DEFAULT_MAX_RUNS}`);
   }
   return lines.join('\n');
+}
+
+const fmtArgv = (argv) => argv.map((a) => (/[\s'"]/.test(a) || a === '' ? JSON.stringify(a) : a)).join(' ');
+
+/** Short form for the native permission prompt, which only shows ~10 lines: one line per command. */
+export function renderPlanCompact(plan, id) {
+  const home = homedir();
+  const lines = [`agent-chat plan ${id}: Allow runs these ${plan.steps.length} commands and nothing else (2 hours).`];
+  plan.steps.forEach((s, i) => lines.push(`${i + 1}. ${fmtArgv(s.argv).split(home).join('~')}${s.share ? '  [output shared]' : ''}`));
+  lines.push('Reasons and review: see the chat message above.');
+  return lines.join('\n');
+}
+
+// ---------- filtering command output before it goes to the other agent ----------
+
+const SECRET_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\btskey-[A-Za-z0-9-]{10,}/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  /\b(?:pt|vk)_[A-Za-z0-9_-]{20,}/g,
+  /((?:api[_-]?key|secret|token|password|passwd|owner[_-]?key|auth)[A-Za-z0-9_]*\s*[:=]\s*)["']?[^\s"']{6,}/gi,
+];
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Deterministic filter: secrets, home path, username, this machine's and the relay's hostnames, emails. */
+export function redact(text, { user, host, extraHosts = [] } = {}) {
+  let out = String(text ?? '');
+  for (const re of SECRET_PATTERNS) out = out.replace(re, (m, keep) => (typeof keep === 'string' && m.startsWith(keep) ? `${keep}[redacted]` : '[redacted]'));
+  out = out.replace(EMAIL, '[email]');
+  out = out.split(homedir()).join('~');
+  for (const h of [host, ...extraHosts].filter((h) => h && h.length > 2)) out = out.replace(new RegExp(escRe(h), 'gi'), '[host]');
+  if (user && user.length > 2) out = out.replace(new RegExp(`\\b${escRe(user)}\\b`, 'g'), '[user]');
+  return out;
+}
+
+/** Fit outputs into the budget: each gets an equal share, unused share passes to the rest. */
+export function fitOutputs(items, budget = SHARE_BUDGET) {
+  let left = budget;
+  return items.map((it, i) => {
+    const share = Math.floor(left / (items.length - i));
+    const text = it.text.length > share ? `${it.text.slice(0, share)}\n[truncated ${it.text.length - share} characters]` : it.text;
+    left -= Math.min(it.text.length, share);
+    return { ...it, text };
+  });
 }

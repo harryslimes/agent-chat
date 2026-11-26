@@ -12,7 +12,7 @@
 // Output: a PreToolUse permission decision, or nothing (no opinion) for unrelated calls.
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { activePlans, APPROVED, DATA_DIR, DEFAULT_MAX_RUNS, KILL_FILE, matchStep, PENDING, renderPlan, splitCommand, stagedPlans, writeJson } from './lib.mjs';
+import { activePlans, APPROVED, DATA_DIR, DEFAULT_MAX_RUNS, KILL_FILE, matchStep, PENDING, renderPlanCompact, splitCommand, stagedPlans, writeJson } from './lib.mjs';
 
 // Optional audit log: AGENT_CHAT_GUARD_LOG=/path/to/file records every decision.
 const log = (decision, reason = '') => {
@@ -90,7 +90,7 @@ if (is('plan-executor')) {
       if (!matchStep(argv, step, rec.plan.variables)) continue;
       rec.asked = { step: step.id, argv, at: Date.now() };
       writeJson(file, rec);
-      decide('ask', `agent-chat: Allow = approve this WHOLE plan for 2 hours (every command below, nothing else).\n\n${renderPlan(rec.plan, rec.hash.slice(0, 12))}`);
+      decide('ask', renderPlanCompact(rec.plan, rec.hash.slice(0, 12)));
     }
   }
   deny('this command is not on any approved menu. Stop and report it as needing a new approval round; do not try variations.');

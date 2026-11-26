@@ -19,8 +19,9 @@ function guard(tool_name, tool_input = {}, agent_type) {
   return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecision : 'none';
 }
 const P = 'mcp__plugin_agent-chat_agent-chat__';
-const post = (tool_name, tool_input = {}, agent_type) => {
-  const r = script('post.mjs', JSON.stringify({ hook_event_name: 'PostToolUse', tool_name, tool_input, tool_response: {}, ...(agent_type ? { agent_type, agent_id: 'a1' } : {}) }));
+const await_home = () => process.env.HOME;
+const post = (tool_name, tool_input = {}, agent_type, tool_response = {}) => {
+  const r = script('post.mjs', JSON.stringify({ hook_event_name: 'PostToolUse', tool_name, tool_input, tool_response, ...(agent_type ? { agent_type, agent_id: 'a1' } : {}) }));
   assert.equal(r.status, 0, r.stderr);
 };
 
@@ -146,11 +147,37 @@ test('one Allow on the native prompt approves the whole staged plan', () => {
   const r = script('guard.mjs', JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls -la src' }, agent_type: 'agent-chat:plan-executor', agent_id: 'a1' }));
   const out = JSON.parse(r.stdout).hookSpecificOutput;
   assert.equal(out.permissionDecision, 'ask');
-  assert.match(out.permissionDecisionReason, /WHOLE plan/);
-  assert.match(out.permissionDecisionReason, /\[b\] git ls-files/, 'prompt shows every command');
+  assert.match(out.permissionDecisionReason, /Allow runs these 2 commands/);
+  assert.match(out.permissionDecisionReason, /^2\. git ls-files/m, 'prompt shows every command, one line each');
+  assert.ok(out.permissionDecisionReason.split('\n').length <= 10, 'fits the prompt without truncation');
   // The user clicked Allow, so the command ran and PostToolUse fires.
   post('Bash', { command: 'ls -la src' }, 'agent-chat:plan-executor');
   assert.equal(guard('Bash', { command: 'git ls-files' }, 'agent-chat:plan-executor'), 'allow', 'rest of the plan runs without a prompt');
   assert.equal(guard('Bash', { command: 'ls -la src' }, 'agent-chat:plan-executor'), 'deny', 'the allowed run counted toward max_runs');
   assert.equal(guard('Bash', { command: 'git status' }, 'agent-chat:plan-executor'), 'deny', 'off-menu still denied');
+});
+
+test('outputs of shared steps go back filtered and size-capped; unshared steps are withheld', () => {
+  const home = (await_home());
+  const plan = { goal: 'share test', steps: [
+    { id: 'pub', argv: ['cat', 'notes.txt'], justification: 'The other agent needs the notes.', share: true, max_runs: 1 },
+    { id: 'priv', argv: ['ls', 'secret-dir'], justification: 'Only for the user.', share: false, max_runs: 1 },
+  ] };
+  const staged = script('stage-plan.mjs', JSON.stringify(plan));
+  assert.match(staged.stdout, /output to the other agent: yes \(filtered\)/);
+  const id = staged.stdout.match(/Plan ([0-9a-f]{12})/)[1];
+  assert.equal(guard('Bash', { command: 'cat notes.txt' }, 'agent-chat:plan-executor'), 'ask');
+  const leak = `path ${home}/x key ghp_abcdefghijklmnopqrstuvwx1234 mail a.b@example.com OWNER_KEY=deadbeefcafe1234 ` + 'z'.repeat(20000);
+  post('Bash', { command: 'cat notes.txt' }, 'agent-chat:plan-executor', { stdout: leak, stderr: '' });
+  assert.equal(guard('Bash', { command: 'ls secret-dir' }, 'agent-chat:plan-executor'), 'allow');
+  post('Bash', { command: 'ls secret-dir' }, 'agent-chat:plan-executor', { stdout: 'private stuff', stderr: '' });
+  const shared = script('share-results.mjs', '', [id]).stdout;
+  assert.ok(!shared.includes(home), 'home path filtered');
+  assert.ok(!shared.includes('ghp_abc'), 'token filtered');
+  assert.ok(!shared.includes('a.b@example.com'), 'email filtered');
+  assert.ok(!shared.includes('deadbeefcafe1234'), 'key=value secret filtered');
+  assert.ok(!shared.includes('private stuff'), 'unshared output withheld');
+  assert.match(shared, /Ran but not shared \(for the user only\): priv/);
+  assert.match(shared, /\[truncated \d+ characters\]/);
+  assert.ok(shared.length < 13000, 'size-capped');
 });
