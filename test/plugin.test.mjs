@@ -19,6 +19,10 @@ function guard(tool_name, tool_input = {}, agent_type) {
   return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecision : 'none';
 }
 const P = 'mcp__plugin_agent-chat_agent-chat__';
+const post = (tool_name, tool_input = {}, agent_type) => {
+  const r = script('post.mjs', JSON.stringify({ hook_event_name: 'PostToolUse', tool_name, tool_input, tool_response: {}, ...(agent_type ? { agent_type, agent_id: 'a1' } : {}) }));
+  assert.equal(r.status, 0, r.stderr);
+};
 
 const PLAN = {
   goal: 'Check Tailscale reachability',
@@ -80,14 +84,15 @@ test('stage -> user approve -> executor runs only exact menu commands, with run 
   const pendingFile = join(dir, 'pending', `${id}.json`);
   const pendingRec = lib.readJson(pendingFile);
   assert.match(staged.stdout, /\[ping\] tailscale ping \{\{peer_ip\}\}/);
-  // Staged: exact matches go to the user's native permission prompt; anything else is denied.
+  // Staged: an exact match raises one native prompt showing the whole plan; anything else is denied.
   assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask', 'staged asks the user');
   assert.equal(guard('Bash', { command: 'tailscale status --json' }, 'agent-chat:plan-executor'), 'deny', 'staged: extra args denied');
   assert.equal(guard('Bash', { command: 'tailscale ping 8.8.8.8' }, 'agent-chat:plan-executor'), 'deny', 'staged: variable pattern enforced');
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask');
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'ask');
-  assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny', 'staged: run limit enforced');
   assert.equal(guard('Bash', { command: 'tailscale status' }), 'none', 'main session gets no free pass from a staged plan');
+  // PostToolUse from another agent, or for a command the guard did not ask about, promotes nothing.
+  post('Bash', { command: 'tailscale status' });
+  post('Bash', { command: 'tailscale ping 100.64.0.1' }, 'agent-chat:plan-executor');
+  assert.equal(guard('Bash', { command: 'tailscale ping 100.64.0.1' }, 'agent-chat:plan-executor'), 'ask', 'still only staged');
 
   // The main session can't approve on the user's behalf.
   assert.equal(guard('Bash', { command: `node plugin/scripts/approve.mjs ${id}` }), 'deny');
@@ -128,4 +133,24 @@ test('stage -> user approve -> executor runs only exact menu commands, with run 
   assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny');
   script('stop.mjs', '', ['--clear']);
   assert.equal(guard('Bash', { command: 'tailscale status' }, 'agent-chat:plan-executor'), 'deny', 'approvals stay revoked after clearing');
+});
+
+test('one Allow on the native prompt approves the whole staged plan', () => {
+  rmSync(join(dir, 'KILL'), { force: true });
+  const plan = { goal: 'two reads', steps: [
+    { id: 'a', argv: ['ls', '-la', 'src'], justification: 'List the source folder.', max_runs: 1 },
+    { id: 'b', argv: ['git', 'ls-files'], justification: 'List tracked files.', max_runs: 1 },
+  ] };
+  const staged = script('stage-plan.mjs', JSON.stringify(plan));
+  assert.equal(staged.status, 0, staged.stdout);
+  const r = script('guard.mjs', JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls -la src' }, agent_type: 'agent-chat:plan-executor', agent_id: 'a1' }));
+  const out = JSON.parse(r.stdout).hookSpecificOutput;
+  assert.equal(out.permissionDecision, 'ask');
+  assert.match(out.permissionDecisionReason, /WHOLE plan/);
+  assert.match(out.permissionDecisionReason, /\[b\] git ls-files/, 'prompt shows every command');
+  // The user clicked Allow, so the command ran and PostToolUse fires.
+  post('Bash', { command: 'ls -la src' }, 'agent-chat:plan-executor');
+  assert.equal(guard('Bash', { command: 'git ls-files' }, 'agent-chat:plan-executor'), 'allow', 'rest of the plan runs without a prompt');
+  assert.equal(guard('Bash', { command: 'ls -la src' }, 'agent-chat:plan-executor'), 'deny', 'the allowed run counted toward max_runs');
+  assert.equal(guard('Bash', { command: 'git status' }, 'agent-chat:plan-executor'), 'deny', 'off-menu still denied');
 });

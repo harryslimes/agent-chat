@@ -3,16 +3,16 @@
 //
 //  - chat-talker:   only the agent-chat MCP tools (it talks; it can't touch the machine).
 //  - chat-reviewer: nothing but its structured answer.
-//  - plan-executor: only Bash commands that exactly match a menu. Pre-approved menus
-//                   (/agent-chat:approve) run silently; staged ones raise the native
-//                   permission prompt so the user clicks Allow or Deny per command.
+//  - plan-executor: only Bash commands that exactly match a menu. Approved menus run
+//                   silently; the first command of a staged menu raises one native
+//                   permission prompt showing the whole menu, and Allow approves it all.
 //  - everyone else (the main session): may not read or send chat messages, curl the chat
 //    message API, or touch the approval store. Remote text only ever reaches the talker.
 //
 // Output: a PreToolUse permission decision, or nothing (no opinion) for unrelated calls.
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { activePlans, APPROVED, DATA_DIR, DEFAULT_MAX_RUNS, KILL_FILE, matchStep, PENDING, splitCommand, stagedPlans, writeJson } from './lib.mjs';
+import { activePlans, APPROVED, DATA_DIR, DEFAULT_MAX_RUNS, KILL_FILE, matchStep, PENDING, renderPlan, splitCommand, stagedPlans, writeJson } from './lib.mjs';
 
 // Optional audit log: AGENT_CHAT_GUARD_LOG=/path/to/file records every decision.
 const log = (decision, reason = '') => {
@@ -50,6 +50,7 @@ const is = (name) => agent === `agent-chat:${name}` || agent === name;
 const AGENT_CHAT_TOOL = /^mcp__[\w-]*agent-chat[\w-]*__/;
 const CHAT_IO = /^mcp__[\w-]*agent-chat[\w-]*__(wait_for_messages|send_message|get_history|end_chat)$/;
 const ALWAYS_OK = new Set(['StructuredOutput', 'ToolSearch']);
+const HANDBACK = new Set(['StructuredOutput', 'SubagentHandback']);
 
 if (is('chat-talker')) {
   // The talker's whole job is the chat, so its chat calls skip the permission prompt.
@@ -59,12 +60,12 @@ if (is('chat-talker')) {
 }
 
 if (is('chat-reviewer')) {
-  if (tool === 'StructuredOutput') process.exit(0);
+  if (HANDBACK.has(tool)) process.exit(0);
   deny(`the reviewer has no tools (tried ${tool}). Answer from the report alone.`);
 }
 
 if (is('plan-executor')) {
-  if (tool === 'StructuredOutput') process.exit(0);
+  if (HANDBACK.has(tool)) process.exit(0);
   if (tool !== 'Bash') deny(`the executor may only run approved commands with Bash (tried ${tool}).`);
   if (existsSync(KILL_FILE)) deny('the kill switch is on (run /agent-chat:stop --clear to reset). Nothing runs.');
   const argv = splitCommand(args.command);
@@ -80,17 +81,16 @@ if (is('plan-executor')) {
       decide('allow', `agent-chat: matches approved plan ${rec.hash.slice(0, 12)} step [${step.id}] (${used + 1}/${max}).`);
     }
   }
-  // Staged but not pre-approved: hand the decision to the user through Claude Code's own
-  // permission prompt. The model can't answer that prompt, so this is still a human gate.
+  // Staged but not yet approved: raise ONE native permission prompt that shows the whole
+  // menu. The model can't answer that prompt. If the user clicks Allow, the command runs
+  // and the PostToolUse hook (post.mjs) promotes the whole plan to approved, so the rest
+  // of the menu runs without further prompts.
   for (const { file, rec } of stagedPlans()) {
     for (const step of rec.plan.steps) {
       if (!matchStep(argv, step, rec.plan.variables)) continue;
-      const used = rec.runs?.[step.id] ?? 0;
-      const max = step.max_runs ?? DEFAULT_MAX_RUNS;
-      if (used >= max) deny(`step [${step.id}] already ran ${used}/${max} times. Ask for a new approval round.`);
-      rec.runs = { ...(rec.runs || {}), [step.id]: used + 1 };
+      rec.asked = { step: step.id, argv, at: Date.now() };
       writeJson(file, rec);
-      decide('ask', `agent-chat plan ${rec.hash.slice(0, 12)}${rec.plan.goal ? ` (${rec.plan.goal})` : ''}, step [${step.id}] (${used + 1}/${max}): ${step.justification}`);
+      decide('ask', `agent-chat: Allow = approve this WHOLE plan for 2 hours (every command below, nothing else).\n\n${renderPlan(rec.plan, rec.hash.slice(0, 12))}`);
     }
   }
   deny('this command is not on any approved menu. Stop and report it as needing a new approval round; do not try variations.');
